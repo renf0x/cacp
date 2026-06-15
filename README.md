@@ -111,6 +111,20 @@ python install.py . --agents generic,claude
 python install.py . --agents all
 ```
 
+Different agents read different instruction files, so pick the ones you
+actually use. The installer never overwrites them — it appends one marked,
+idempotent adapter block:
+
+| Option | Wires the protocol into |
+|---|---|
+| `generic` | `AGENT_CONTEXT.md` — the vendor-neutral protocol every agent follows |
+| `codex` | `AGENTS.md` — read by Codex, Cursor, Copilot, Gemini, Cline, Roo, … |
+| `claude` | `CLAUDE.md` — read by Claude Code |
+| `all` (default) | all of the above |
+
+So: only Claude Code → `--agents generic,claude`; only Codex → `generic,codex`;
+several agents → `all`.
+
 ### Global install (optional)
 
 `install.py` drops a local `ctx.py` / `rlm.py` copy into each project, invoked
@@ -124,6 +138,24 @@ pip install .
 This registers three console scripts — `ctx`, `rlm`, and `ctx-rlm-login`. A
 local `ctx.py` copy still takes priority when present, so per-project pinning
 keeps working.
+
+### Quick use in a project
+
+1. Install once into the project:
+   `python install.py . --agents <yours> --open-obsidian`
+   (also scaffolds the shared `memory/` vault and the handoff/adapter files).
+2. After that the agent applies the protocol automatically — its instruction
+   file now points at `AGENT_CONTEXT.md`, so you rarely type commands yourself.
+
+When you do, these cover almost everything:
+
+```powershell
+ctx map                          # see what is expensive to read first
+ctx run -- npm test              # filter a noisy command; full log saved locally
+rlm --query "<question>"         # answer over a huge context, not your window
+ctx memory query "<question>"    # ask durable project memory
+ctx report                       # measured token savings (never estimated)
+```
 
 ## Normal Usage
 
