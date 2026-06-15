@@ -17,10 +17,19 @@ class InstallerTests(unittest.TestCase):
             self.assertTrue((project / "ctx.py").is_file())
             self.assertTrue((project / "rlm.py").is_file())
             self.assertTrue((project / "AGENT_CONTEXT.md").is_file())
+            self.assertEqual(
+                (project / "AGENT_CONTEXT.md").read_text(encoding="utf-8"),
+                install.read_template("AGENT_CONTEXT.md"),
+            )
             agents = (project / "AGENTS.md").read_text(encoding="utf-8")
             self.assertIn("# Existing", agents)
+            self.assertIn(install.read_template("adapters/AGENTS.md").strip(), agents)
             self.assertEqual(agents.count(install.MANAGED_START), 1)
             self.assertTrue((project / "CLAUDE.md").is_file())
+            self.assertEqual(
+                (project / "CLAUDE.md").read_text(encoding="utf-8"),
+                install.read_template("adapters/CLAUDE.md").rstrip() + "\n",
+            )
 
     def test_repeated_install_does_not_duplicate_managed_blocks(self):
         with tempfile.TemporaryDirectory() as temp:
