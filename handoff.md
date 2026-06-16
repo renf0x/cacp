@@ -27,10 +27,10 @@
     `Read`/`Bash` pulls as `op:"direct"`, so coverage reflects context that
     bypasses ctx. Opt-in via settings.json (see below); not yet wired by default.
 - Added `ctx rawcount <path|->` as the no-compression baseline token meter.
-- Created `C:\Users\renf\Desktop\TravelAgent-noctx` as a copy of `TravelAgent`
+- Created `C:\Users\renf\Desktop\private-project-noctx` as a copy of `private-project`
   without ctx/RLM/CodeGraph/memory tooling instructions or files.
 - Added local `ctx.py` and `rlm.py` to the original
-  `C:\Users\renf\Desktop\TravelAgent`.
+  `C:\Users\renf\Desktop\private-project`.
 - Created `C:\Users\renf\Desktop\ctx-benchmark-lab` with `with-ctx` and
   `without-ctx` fixture projects plus prompts for fresh-session benchmarking.
 - Added explicit OpenRouter provider support: `--provider openrouter --model
@@ -78,13 +78,13 @@
 ### TASK-20260616-006 Private-repo external RLM run
 
 - Status: blocked
-- Goal: Run RLM quality tests on the private `TravelAgent` repository through OpenAI/opencode providers.
+- Goal: Run RLM quality tests on the private `private-project` repository through OpenAI/opencode providers.
 - Blocker: Current execution policy rejects sending private repository content to external providers, even after user approval.
 - Unblock: Use a local model, a sanitized public fixture, or a different execution environment where the data-transfer policy permits the run.
 
 ## Done this session
 
-### 2026-06-16 Raw baseline meter and TravelAgent A/B copy
+### 2026-06-16 Raw baseline meter and private-project A/B copy
 
 - Added `ctx rawcount` for file/directory/stdin baseline token counts with no
   compression, no LLM call, and no ledger write.
@@ -92,9 +92,9 @@
   files.
 - Added a unit test covering directory counting, secret exclusion, and no
   ledger side effect.
-- Created `TravelAgent-noctx` outside this repo and stripped ctx/RLM/CodeGraph
+- Created `private-project-noctx` outside this repo and stripped ctx/RLM/CodeGraph
   context tooling from agent docs and local files.
-- Original `TravelAgent` now has local `ctx.py` and `rlm.py`.
+- Original `private-project` now has local `ctx.py` and `rlm.py`.
 - Created `ctx-benchmark-lab` on the Desktop. It contains a copy of this ctx
   repository, a `with-ctx` synthetic weather task with strict digest/run rules,
   a matching `without-ctx` control, and prompt files for both runs.
@@ -109,7 +109,7 @@
 
 - Created `docs/token-memory-audit.md`.
 - Bootstrapped project memory and opened the Obsidian vault once.
-- Audited deterministic CTX context reduction on a safe copy of `TravelAgent` under `.ctx/audit/TravelAgent-copy`; original `TravelAgent` was not modified.
+- Audited deterministic CTX context reduction on a safe copy of `private-project` under `.ctx/audit/private-project-copy`; original `private-project` was not modified.
 - Confirmed real measured context reduction for `ctx digest` and startup memory routing.
 - Attempted real external RLM through OpenAI OAuth and opencode free providers, but both were blocked by execution policy because they would send private repository content to external services.
 - Added README status language: current numbers prove measured context reduction, not confirmed provider-billing savings or RLM answer-quality improvement.

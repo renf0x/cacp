@@ -5,7 +5,7 @@ Date: 2026-06-16
 ## Executive Summary
 
 The deterministic parts of CTX produce real, measurable **context reduction**
-on a large project. On a safe copy of `TravelAgent`, `ctx digest` reduced 10
+on a large project. On a safe copy of `private-project`, `ctx digest` reduced 10
 expensive files from 98,930 estimated tokens to 5,042 admitted tokens, avoiding
 93,888 estimated tokens of agent-visible text in one pass, a 19.6x reduction.
 A normal startup route through
@@ -19,20 +19,20 @@ to both OpenAI-backed `openai-oauth` and the free `opencode` provider. The
 previous fake-provider path is intentionally excluded from this report because
 it proves plumbing only, not answer quality.
 
-The memory system is useful but currently inconsistent in `TravelAgent`.
+The memory system is useful but currently inconsistent in `private-project`.
 Existing notes preserve stable project facts, but the vault does not satisfy
 the current CTX memory schema, and `handoff.md` is carrying durable architecture
 and operations history that should be moved into memory notes.
 
 ## Method
 
-All `TravelAgent` experiments were run against:
+All `private-project` experiments were run against:
 
 ```text
-.ctx/audit/TravelAgent-copy
+.ctx/audit/private-project-copy
 ```
 
-The original `C:\Users\renf\Desktop\TravelAgent` was not modified. The copy
+The original `C:\Users\renf\Desktop\private-project` was not modified. The copy
 excluded `.git`, `node_modules`, `dist`, `.ctx`, `.claude`, `.codegraph`,
 `.env*`, caches, and binary image/archive/runtime files.
 
@@ -51,7 +51,7 @@ billing counts.
 | Scenario | Raw tokens | Admitted tokens | Saved tokens | Ratio | Evidence |
 |---|---:|---:|---:|---:|---|
 | `ctx-agent-context-stack` full map after memory bootstrap | 34,749 | n/a | n/a | n/a | `ctx map . --top 20` |
-| `TravelAgent` safe copy full map | 354,281 | n/a | n/a | n/a | Full-read size baseline, not normal-agent baseline |
+| `private-project` safe copy full map | 354,281 | n/a | n/a | n/a | Full-read size baseline, not normal-agent baseline |
 | Startup context (`AGENTS.md`, `handoff.md`, `PROJECT_CONTEXT.md`, `memory/MEMORY.md`) | 354,281 | 5,951 | 348,330 | 59.5x | Smaller than full-read baseline, not proven session savings |
 | Memory Markdown only | 354,281 | 3,244 | 351,037 | 109.2x | summed `memory/*.md` |
 | 10 expensive-file digest sample | 98,930 | 5,042 | 93,888 | 19.6x | Text reduction; utility varies by file type |
@@ -111,7 +111,7 @@ without repository content worked with `opencode/deepseek-v4-flash-free`, and
 not permission to send private code through it in this sandbox.
 
 Because real RLM was blocked, this audit cannot claim that RLM improved answer
-quality on `TravelAgent`. It can only say that RLM quality remains unmeasured
+quality on `private-project`. It can only say that RLM quality remains unmeasured
 under the current execution policy.
 
 ## Ground-Truth Spot Checks
@@ -140,13 +140,13 @@ Manual `rg` spot-checks found the facts a real RLM answer should recover:
 
 CodeGraph was not reliable in the copied project. Because `.codegraph` was
 excluded, `codegraph context "admin CRM architecture"` returned toolkit
-context (`ctx.py:MEMORY_REQUIRED`) instead of `TravelAgent`. This is a real
+context (`ctx.py:MEMORY_REQUIRED`) instead of `private-project`. This is a real
 integration hazard: CodeGraph needs a project-local index or a guard that
 detects project/index mismatch.
 
 ## Memory Findings
 
-`TravelAgent` memory is compact and useful, but not compatible with the current
+`private-project` memory is compact and useful, but not compatible with the current
 CTX schema. `ctx memory check` failed with missing required files including
 `memory/project-rules.md`, `memory/architecture.md`, `memory/decisions.md`,
 `memory/bugs.md`, `memory/investigations.md`, `memory/operations.md`,
@@ -202,6 +202,6 @@ success scoring.
 4. Improve SQL/CSS digest heuristics. `seed.sql` compressing to 19 tokens is
    impressive but likely too lossy for real data tasks.
 5. Add CodeGraph project/index mismatch detection.
-6. Normalize `TravelAgent` memory to the CTX schema without overwriting user
+6. Normalize `private-project` memory to the CTX schema without overwriting user
    notes.
 7. Keep `handoff.md` task-only and move durable facts into memory journals.

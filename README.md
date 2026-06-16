@@ -58,7 +58,7 @@ This project is still being tested. The current evidence supports **measured
 context reduction**, not a blanket claim of lower provider billing or better
 answers in every agent session.
 
-What has been observed in a real-project audit on a safe copy of `TravelAgent`
+What has been observed in a real-project audit on a safe copy of `private-project`
 (`docs/token-memory-audit.md`):
 
 - Full copied project size: approximately **354,000 estimated tokens**.
