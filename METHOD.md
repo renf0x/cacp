@@ -102,6 +102,23 @@ The one thing CACP will not do is assert a fixed savings percentage. The exact
 number is a property of your repo and task mix — `measure` tells you what it
 actually was.
 
+## Measured reality check (real A/B runs, 2026-07-14)
+
+Five real headless agent runs (INV-001..003) established the honest КПД:
+
+- **Repeatable win:** new input admitted per turn drops in every CACP run
+  (−17.5%, −64%, −44%) — the admission pressure is real.
+- **Repeatable loss:** turns multiply (24 → 53/58); each turn replays history,
+  so effective input rose +31…72% — instruction-only protocols made the total
+  WORSE on these short/medium tasks.
+- **Instructions are weak enforcement:** a small model ignored the ctx tools and
+  the batching rule; two near-identical runs varied 16k ↔ 42k output tokens, so
+  single-pair A/Bs cannot prove small effects.
+- **Consequence:** the roadmap priority is deterministic enforcement over
+  advisory text — richer `pack --digest K` startup packets that pre-answer
+  exploration, and hook-level funnels (rewrite full reads into digests) that do
+  not depend on model obedience. Quality stayed equal in all runs.
+
 ## Non-goals (deliberately removed)
 
 - **RLM sub-agent + provider backends + OAuth login** — duplicates native agent

@@ -1,5 +1,31 @@
 # Investigation Log
 
+## INV-20260714-003 Validation run: the turn-batching INSTRUCTION did not hold
+
+- Status: closed
+- Date: 2026-07-14
+- Question: Does adding an explicit turn-batching rule to the adapter fix the
+  turn multiplication found in INV-002?
+- Method: same audit task/model/tools; B re-initialized with the updated adapter
+  (rule verified present in CLAUDE.md before the run). One run.
+- Findings (real):
+  - Turns did NOT drop: 58 (vs 53 old-protocol, 24 baseline). The model again
+    ignored ctx commands (grep + 12 windowed reads of ctx.py) and additionally
+    made 2 Write calls (drafting the audit to disk), exploding output to 42,176
+    (vs 16,015 old-protocol, 12,449 baseline). Effective input +72% vs baseline.
+  - New-input-per-turn stayed down (−44% vs baseline) — that effect repeats
+    across all three CACP runs (−17.5%, −64%, −44%).
+  - Between two near-identical CACP runs, output varied 16k ↔ 42k: single-pair
+    A/B at this variance cannot establish small effects.
+- Conclusion: instruction-only protocols are WEAK, unstable enforcement on a
+  small model. The repeatable win is deterministic admission pressure (read
+  less per step); the repeatable loss is turn multiplication, and a written
+  rule does not fix it. Next real lever must be deterministic, not advisory:
+  richer `pack --digest K` packets that pre-answer exploration, and/or a
+  PreToolUse hook that rewrites full reads into digests. More single runs will
+  not settle small deltas — variance dominates.
+- Links: INV-20260714-002, [[../docs/measurement-protocol]]
+
 ## INV-20260714-002 Real headless A/B: long 8-part audit task (the honest КПД)
 
 - Status: closed
