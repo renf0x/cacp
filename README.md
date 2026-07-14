@@ -158,12 +158,17 @@ ctx measure --transcript path\to\session.jsonl
 
 # API: feed the response usage objects and your prices
 ctx measure --usage-json usage.json --in-price 5 --out-price 25
+
+# A/B: honest one-command diff of two real runs (baseline vs CACP)
+ctx measure --compare runA.jsonl runB.jsonl
 ```
 
-It reports uncached input, cache read (0.1x), cache write (1.25x), output, the
-**cache-read share of input**, hit rate, effective input, and (with prices) an
-effective dollar cost. A low cache-read share means something is invalidating the
-prefix — rebuild it with `ctx pack` and stop editing context mid-session.
+The report is split honestly in two: **TOOL-CONTROLLABLE** (new input admitted
+per turn, output, turns — the only block attributable to a workflow/tool) and
+**PLATFORM CACHE** (the provider's automatic 0.1x discount — informational,
+never claimed as the tool's saving). A low cache-read share means something is
+invalidating the prefix — rebuild it with `ctx pack` and stop editing context
+mid-session.
 
 `ctx report` aggregates the local ledger (admitted-vs-avoided, input-side,
 heuristic `chars/3.5`). Treat it as a **planning** signal for climbing the ladder;

@@ -2,6 +2,18 @@
 
 Record meaningful changes to the memory system.
 
+## 2026-07-14 — measurement honesty + retrieval/digest quality
+
+- `measure` now separates PLATFORM CACHE (the provider's automatic 0.1x
+  discount — never claimed as the tool's saving) from TOOL-CONTROLLABLE
+  metrics (new input admitted per turn, output, turns). Added
+  `measure --compare A B` for one-command A/B deltas on real transcripts.
+- Retrieval tokenizer is Unicode-aware (`\w+`): Russian/Cyrillic notes are now
+  searchable; query hits in section headings score double.
+- File-type-aware digests: SQL keeps schema (CREATE blocks, INSERT targets,
+  policies) and drops data rows with an honest omission marker; CSS keeps
+  selectors/@media/custom properties. Closes the seed.sql over-compression task.
+
 ## 2026-07-14 — CACP migration (v0.1.0)
 
 - Reframed the whole toolkit as **CACP (Cache-Aware Context Protocol)** with five

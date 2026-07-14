@@ -102,6 +102,23 @@ class MemoryTests(unittest.TestCase):
         self.assertIn("digest large files", text)
         self.assertIn("local retrieval, no LLM", text)
 
+    def test_query_finds_russian_notes(self):
+        # \w+ tokenizer must handle Cyrillic -- an ASCII-only regex made Russian
+        # notes invisible to retrieval.
+        self.init_memory()
+        (self.root / "memory" / "decisions.md").write_text(
+            "# Решения\n\n## DEC-9 Кэширование префикса\n\n"
+            "- Решение: держать префикс стабильным ради кэша.\n",
+            encoding="utf-8",
+        )
+        args = argparse.Namespace(
+            path=str(self.root), scope="memory",
+            question="кэширование префикса", top=3, json=False,
+        )
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ctx.cmd_memory_query(args), 0)
+        self.assertIn("Кэширование префикса", out.getvalue())
+
     def test_query_project_scope_searches_repo_files(self):
         self.init_memory()
         (self.root / "app.py").write_text(
@@ -263,6 +280,48 @@ class PackTests(unittest.TestCase):
         self.assertIn("pack", [r["op"] for r in recs])
 
 
+class DigestTests(unittest.TestCase):
+    def test_sql_digest_keeps_schema_and_drops_data(self):
+        sql = (
+            "CREATE TABLE users (\n"
+            "  id uuid PRIMARY KEY,\n"
+            "  email text NOT NULL\n"
+            ");\n"
+            "INSERT INTO users (id, email) VALUES\n"
+            "  ('1', 'a@x.com'),\n"
+            "  ('2', 'b@x.com'),\n"
+            "  ('3', 'c@x.com');\n"
+            "CREATE POLICY p ON users USING (true);\n"
+        )
+        kept = "\n".join(ctx.digest_sql(sql))
+        self.assertIn("CREATE TABLE users", kept)
+        self.assertIn("email text NOT NULL", kept)       # column list survives
+        self.assertIn("INSERT INTO users (id, email)", kept)  # target+columns survive
+        self.assertIn("CREATE POLICY", kept)
+        self.assertNotIn("a@x.com", kept)                # data rows dropped
+        self.assertIn("data/detail lines omitted", kept)  # honest omission marker
+
+    def test_css_digest_keeps_selectors_and_custom_props(self):
+        css = (
+            ":root {\n"
+            "  --brand: #123456;\n"
+            "}\n"
+            "@media (max-width: 600px) {\n"
+            "  .card {\n"
+            "    padding: 4px;\n"
+            "    color: red;\n"
+            "  }\n"
+            "}\n"
+        )
+        kept = "\n".join(ctx.digest_css(css))
+        self.assertIn(":root {", kept)
+        self.assertIn("--brand", kept)                   # custom property survives
+        self.assertIn("@media (max-width: 600px)", kept)
+        self.assertIn(".card {", kept)
+        self.assertNotIn("color: red", kept)             # declarations dropped
+        self.assertIn("declaration lines omitted", kept)
+
+
 class MeasureTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
@@ -293,7 +352,7 @@ class MeasureTests(unittest.TestCase):
         self.assertIn("2 assistant turn(s)", text)
         self.assertIn("2,000", text)          # input total = 200 + 1700 + 100
         self.assertIn("85.0%", text)          # cache-read share 1700/2000
-        self.assertIn("94.4%", text)          # hit rate 1700/1800
+        self.assertIn("300", text)            # tool-controllable new input = 200 + 100
 
     def test_measure_usage_json_from_stdin(self):
         usage = [{"input_tokens": 10, "output_tokens": 5,
@@ -311,6 +370,46 @@ class MeasureTests(unittest.TestCase):
         with contextlib.redirect_stderr(io.StringIO()) as err:
             self.assertEqual(ctx.cmd_measure(args), 1)
         self.assertIn("no usage records", err.getvalue())
+
+    def test_measure_separates_platform_cache_from_tool_metrics(self):
+        transcript = self._write_transcript([
+            {"input_tokens": 100, "output_tokens": 50,
+             "cache_read_input_tokens": 9000, "cache_creation_input_tokens": 400},
+        ])
+        args = argparse.Namespace(transcript=str(transcript), usage_json=None,
+                                  in_price=0.0, out_price=0.0)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ctx.cmd_measure(args), 0)
+        text = out.getvalue()
+        self.assertIn("TOOL-CONTROLLABLE", text)
+        self.assertIn("PLATFORM CACHE", text)
+        self.assertIn("NOT this tool's saving", text)
+        self.assertIn("500", text)  # new input = 100 uncached + 400 cache-write
+
+    def test_measure_compare_diffs_tool_controllable_metrics(self):
+        a = self._write_transcript([
+            {"input_tokens": 1000, "output_tokens": 400,
+             "cache_read_input_tokens": 5000, "cache_creation_input_tokens": 3000},
+            {"input_tokens": 1000, "output_tokens": 400,
+             "cache_read_input_tokens": 5000, "cache_creation_input_tokens": 3000},
+        ])
+        b_path = self.root / "b.jsonl"
+        b_path.write_text(json.dumps(
+            {"type": "assistant", "message": {"usage": {
+                "input_tokens": 200, "output_tokens": 300,
+                "cache_read_input_tokens": 6000,
+                "cache_creation_input_tokens": 800}}}) + "\n", encoding="utf-8")
+        args = argparse.Namespace(transcript=None, usage_json=None,
+                                  in_price=0.0, out_price=0.0,
+                                  compare=[str(a), str(b_path)])
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ctx.cmd_measure(args), 0)
+        text = out.getvalue()
+        self.assertIn("tool-controllable", text)
+        self.assertIn("platform cache (informational)", text)
+        # A new input = 2*(1000+3000)=8000; B = 200+800=1000 -> -87.5%
+        self.assertIn("-87.5%", text)
+        self.assertIn("turns", text)
 
 
 class LedgerTests(unittest.TestCase):

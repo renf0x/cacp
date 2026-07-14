@@ -1,5 +1,30 @@
 # Investigation Log
 
+## INV-20260714-001 Real headless A/B: baseline vs CACP on a short task
+
+- Status: closed
+- Date: 2026-07-14
+- Question: What does CACP actually change in a REAL agent session, isolated
+  from the platform's automatic prompt caching?
+- Method: Two identical copies of this repo's real source; B additionally got
+  `ctx init --agents claude`. Same task (explain ledger dedup + RECON_OPS in
+  ctx.py), same model (haiku), same tool allowlist, headless `claude -p`,
+  one run each. Compared real transcripts with `ctx measure --compare`.
+- Findings (real, single pair — not a statistical claim):
+  - new input admitted PER TURN: −17.5% for B; output per turn: −17.0% for B —
+    the ladder/digest discipline measurably reduced per-turn admission.
+  - BUT B took +2 turns (9→11: reading the packet/protocol costs turns), so
+    TOTAL new input was +0.8% and effective input +5.0% — net neutral-to-worse
+    on a ~30-second task.
+  - Answer quality: both correct, equal (both found tool_id dedup + RECON_OPS).
+  - Platform cache served ~192k (A) / ~247k (B) tokens regardless of the tool —
+    confirming that cache savings must never be attributed to CACP.
+- Conclusion: CACP's per-turn mechanism works, but its fixed overhead (packet +
+  protocol reads) eats the gain on short tasks. Expected break-even is longer
+  sessions where the one-time packet cost amortizes over many turns; that is
+  the next thing to measure. Mirrors caveman's honest fixed-overhead math.
+- Links: [[../docs/measurement-protocol]], `ctx.py` (`cmd_measure`)
+
 ## INV-000 Template
 
 - Status: example

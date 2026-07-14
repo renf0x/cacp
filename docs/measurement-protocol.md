@@ -25,22 +25,33 @@ Run the **same real task twice** in your agent, on the same starting commit.
   packet once, then climb the ladder (`map`/`digest`/`read`/`run`) and retrieve
   from memory instead of re-reading.
 
-Then compare real usage:
+Then compare real usage in one command:
 
 ```bash
-# Subscription (Claude Code): auto-detects ~/.claude/projects/<slug>/, or pass a file
-python ctx.py measure --transcript <path-to-run-A.jsonl>
-python ctx.py measure --transcript <path-to-run-B.jsonl>
+# A/B diff (each side: transcript .jsonl file/dir, or a .json usage dump)
+python ctx.py measure --compare <run-A.jsonl> <run-B.jsonl>
 
-# API (pay per token): feed the response usage objects and your prices
-python ctx.py measure --usage-json runA-usage.json --in-price 5 --out-price 25
-python ctx.py measure --usage-json runB-usage.json --in-price 5 --out-price 25
+# Or inspect one run
+python ctx.py measure --transcript <run.jsonl>
+python ctx.py measure --usage-json usage.json --in-price 5 --out-price 25
 ```
 
-`measure` reports, per run: uncached input, cache read (0.1x), cache write
-(1.25x), output, **cache-read share of input**, cache hit rate, effective input
-in base-token-equivalents, and (with prices) an effective dollar cost. Compare B
-to A on the metric that matches how you pay.
+## Attribution: platform vs tool (do not conflate them)
+
+`measure` deliberately splits the report in two:
+
+- **TOOL-CONTROLLABLE** — *new input admitted per turn* (uncached input +
+  cache-write: file reads, tool output, instructions), *output*, and *turns*.
+  This is what a workflow/tool can actually change, and the only block you may
+  attribute to CACP in an A/B.
+- **PLATFORM CACHE** — cache-read volume and the 0.1x discount. The provider
+  applies this automatically to any session; a high number here is mostly the
+  platform's (and session length's) doing, NOT the tool's saving. A tool only
+  influences it indirectly by keeping the prefix stable.
+
+Example: a session showing "88% saved by cache" says almost nothing about the
+tool — Claude Code caches by itself. The honest tool effect is the **delta in
+new-input-per-turn, output, and turns between run A and run B**.
 
 ## Reading the result honestly
 

@@ -356,11 +356,81 @@ def cmd_map(args: argparse.Namespace) -> int:
 
 # ----------------------------------------------------------------- pack ----
 
+SQL_STMT_RE = re.compile(
+    r"^\s*(create|alter|drop|truncate|comment on|grant|revoke|insert into|copy"
+    r"|create policy|enable row level security|--)", re.IGNORECASE)
+SQL_CREATE_BLOCK_RE = re.compile(
+    r"^\s*create\s+(table|type|view|materialized view|index|function|trigger|policy)",
+    re.IGNORECASE)
+
+
+def digest_sql(text: str) -> list[str]:
+    """SQL-aware digest: keep schema (CREATE blocks with their column lists),
+    statement headers (INSERT INTO names table+columns), policies/grants and
+    comments; drop the data rows, reporting how many were omitted. The generic
+    digest used to crush seed files to near-nothing and lose the schema."""
+    out: list[str] = []
+    in_block = False
+    omitted = 0
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s:
+            continue
+        if in_block:
+            out.append(ln.rstrip())
+            if s.endswith((");", ")")) or s == ");":
+                in_block = False
+            continue
+        if SQL_CREATE_BLOCK_RE.match(ln):
+            out.append(ln.rstrip())
+            # a CREATE ... ( that does not close on the same line opens a block
+            # whose body (columns/constraints) is schema, not data -- keep it
+            if "(" in ln and ");" not in ln:
+                in_block = True
+            continue
+        if SQL_STMT_RE.match(ln):
+            out.append(ln.rstrip())
+        else:
+            omitted += 1
+    if omitted:
+        out.append(f"-- [{omitted} data/detail lines omitted by digest]")
+    return out
+
+
+CSS_PROP_RE = re.compile(r"^\s*--[\w-]+\s*:")
+
+
+def digest_css(text: str) -> list[str]:
+    """CSS-aware digest: keep the structure that answers layout questions --
+    selectors, @media/@supports/@keyframes, custom properties -- and drop
+    individual declarations, reporting how many were omitted."""
+    out: list[str] = []
+    omitted = 0
+    for ln in text.splitlines():
+        s = ln.strip()
+        if not s or s.startswith(("/*", "*")):
+            continue
+        if (s.startswith("@") or "{" in s or s == "}" or CSS_PROP_RE.match(ln)):
+            out.append(ln.rstrip())
+        else:
+            omitted += 1
+    if omitted:
+        out.append(f"/* [{omitted} declaration lines omitted by digest] */")
+    return out
+
+
 def _digest_text(p: Path) -> str:
-    """Structural digest of a single file, shared by `digest` and `pack`."""
+    """Structural digest of a single file, shared by `digest` and `pack`.
+    File-type aware: Python via AST, SQL keeps schema not data, CSS keeps
+    selectors not declarations, everything else via the generic keep-list."""
     text = read_text(p)
-    if p.suffix == ".py":
+    suf = p.suffix.lower()
+    if suf == ".py":
         kept = digest_python(text)
+    elif suf == ".sql":
+        kept = digest_sql(text)
+    elif suf in {".css", ".scss", ".less"}:
+        kept = digest_css(text)
     else:
         kept = [ln.rstrip() for ln in text.splitlines() if GENERIC_KEEP.match(ln)]
         if not kept:
@@ -834,7 +904,9 @@ def cmd_memory_check(args: argparse.Namespace) -> int:
 # common "what do we already know about X" question: no provider, no keys, no
 # extra token spend -- the agent loads only the few blocks it needs.
 
-_WORD_RE = re.compile(r"[A-Za-z0-9_]+")
+# \w is Unicode-aware in Python: Cyrillic/CJK/accented notes are searchable too,
+# not only ASCII identifiers.
+_WORD_RE = re.compile(r"\w+", re.UNICODE)
 
 
 def _tokenize(text: str) -> list[str]:
@@ -900,7 +972,10 @@ def _retrieve(root: Path, query: str, top: int,
             hits = sum(1 for w in words if w in qterms)
             if not hits:
                 continue
-            score = hits / (len(words) ** 0.5)
+            # A query term in the section heading is a stronger relevance signal
+            # than one buried in the body -- count heading hits twice.
+            head_hits = sum(1 for w in _tokenize(heading) if w in qterms)
+            score = (hits + head_hits) / (len(words) ** 0.5)
             scored.append((score, rel, heading, block))
     scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
     return scored[:top]
@@ -1415,13 +1490,109 @@ def _collect_usage(args: argparse.Namespace) -> tuple[list[dict], str]:
     return recs, f"transcript:{src}"
 
 
-def cmd_measure(args: argparse.Namespace) -> int:
-    """Pillar 5: report REAL billed tokens + cache-hit rate from provider usage.
+def _usage_stats(recs: list[dict]) -> dict[str, float]:
+    """Aggregate raw usage records into the metrics `measure` reports.
 
-    Reads actual usage -- Claude Code transcript JSONL (subscription) or an API
-    usage dump (pay-per-token) -- and never estimates. Shows how much input was
-    served from cache (the lever a stable `pack` prefix pulls on) and the
-    effective input cost under the real cache multipliers."""
+    The split matters: `cache_read` is history the PLATFORM re-serves at a
+    discount regardless of any tool -- crediting it to ctx would be dishonest.
+    What a context tool actually controls is the NEW tokens admitted each turn
+    (uncached input + cache_creation: file reads, tool output, instructions),
+    the output length, and how many turns the task takes."""
+    def total(key: str) -> int:
+        return sum(int(u.get(key, 0) or 0) for u in recs)
+
+    inp, out = total("input_tokens"), total("output_tokens")
+    c_read, c_write = total("cache_read_input_tokens"), total("cache_creation_input_tokens")
+    turns = len(recs)
+    new_input = inp + c_write  # tokens entering context for the first time
+    return {
+        "turns": turns,
+        "input_uncached": inp,
+        "cache_read": c_read,
+        "cache_write": c_write,
+        "output": out,
+        "new_input": new_input,
+        "new_per_turn": new_input / max(turns, 1),
+        "out_per_turn": out / max(turns, 1),
+        "input_total": inp + c_read + c_write,
+        "eff_input": inp + c_read * CACHE_READ_MULT + c_write * CACHE_WRITE_MULT,
+    }
+
+
+def _print_stats(s: dict[str, float], source: str,
+                 in_price: float, out_price: float) -> None:
+    print(f"# REAL usage from {source} -- {s['turns']:.0f} assistant turn(s)")
+    print("\nTOOL-CONTROLLABLE  (what CACP/agent discipline can change)")
+    print(f"  new input admitted (uncached + cache-write) : {s['new_input']:>12,.0f}")
+    print(f"    per turn                                   : {s['new_per_turn']:>12,.0f}")
+    print(f"  output                                       : {s['output']:>12,.0f}")
+    print(f"    per turn                                   : {s['out_per_turn']:>12,.0f}")
+    print(f"  turns                                        : {s['turns']:>12,.0f}")
+    print("\nPLATFORM CACHE  (informational -- NOT this tool's saving)")
+    cache_share = 100.0 * s["cache_read"] / max(s["input_total"], 1)
+    print(f"  cache read (0.1x)  : {s['cache_read']:>14,.0f}   "
+          f"share of input: {cache_share:.1f}%")
+    print(f"  effective input    : {s['eff_input']:>14,.0f} base-token-equiv "
+          f"(caching off: {s['input_total']:,.0f})")
+    print("  the cache discount is applied by the provider automatically; a tool")
+    print("  only influences it indirectly by keeping the prefix stable.")
+    if in_price or out_price:
+        cost = s["eff_input"] / 1e6 * in_price + s["output"] / 1e6 * out_price
+        print(f"  $ at ${in_price}/MTok in + ${out_price}/MTok out : ${cost:.4f}")
+
+
+def _collect_from_path(path: str) -> tuple[list[dict], str]:
+    """Load usage records from a path for --compare: .jsonl transcript (file or
+    dir) or a .json usage dump."""
+    if path.endswith(".json"):
+        return _collect_usage(argparse.Namespace(usage_json=path, transcript=None))
+    return _collect_usage(argparse.Namespace(usage_json=None, transcript=path))
+
+
+def cmd_measure(args: argparse.Namespace) -> int:
+    """Pillar 5: report REAL billed tokens from provider usage, separating the
+    platform's automatic cache discount from what the tool actually controls.
+
+    Single mode: stats for one transcript/usage dump. Compare mode
+    (`--compare A B`): baseline vs CACP run -- the honest tool-effect deltas are
+    new-input-per-turn, output, and turns; the platform cache is reported but
+    never claimed as the tool's saving."""
+    if getattr(args, "compare", None):
+        a_path, b_path = args.compare
+        try:
+            a_recs, a_src = _collect_from_path(a_path)
+            b_recs, b_src = _collect_from_path(b_path)
+        except (OSError, json.JSONDecodeError) as exc:
+            sys.stderr.write(f"[ctx] measure: could not read usage ({exc})\n")
+            return 1
+        if not a_recs or not b_recs:
+            sys.stderr.write(f"[ctx] measure: no usage records in "
+                             f"{'A' if not a_recs else 'B'}\n")
+            return 1
+        a, b = _usage_stats(a_recs), _usage_stats(b_recs)
+        print(f"# A/B compare -- A(baseline): {a_src}")
+        print(f"#               B(candidate): {b_src}")
+        print(f"\n{'metric':<28} {'A':>12} {'B':>12} {'delta':>9}")
+
+        def row(label: str, key: str) -> None:
+            av, bv = a[key], b[key]
+            pct = 100.0 * (bv - av) / max(av, 1)
+            print(f"{label:<28} {av:>12,.0f} {bv:>12,.0f} {pct:>+8.1f}%")
+
+        print("-- tool-controllable " + "-" * 42)
+        row("new input admitted", "new_input")
+        row("  new input / turn", "new_per_turn")
+        row("output", "output")
+        row("  output / turn", "out_per_turn")
+        row("turns", "turns")
+        print("-- platform cache (informational) " + "-" * 29)
+        row("cache read", "cache_read")
+        row("effective input", "eff_input")
+        print("\n# negative delta = B used less. Only the tool-controllable block is")
+        print("# attributable to the workflow under test; cache-read volume mostly")
+        print("# tracks session length and the provider's automatic caching.")
+        return 0
+
     try:
         recs, source = _collect_usage(args)
     except (OSError, json.JSONDecodeError) as exc:
@@ -1434,40 +1605,7 @@ def cmd_measure(args: argparse.Namespace) -> int:
             "    project dir so ~/.claude/projects/<slug>/ is auto-detected.\n"
             "  API: pipe response usage JSON with `--usage-json -` or `--usage-json <file>`.\n")
         return 1
-
-    def total(key: str) -> int:
-        return sum(int(u.get(key, 0) or 0) for u in recs)
-
-    inp, out = total("input_tokens"), total("output_tokens")
-    c_read, c_write = total("cache_read_input_tokens"), total("cache_creation_input_tokens")
-    input_total = inp + c_read + c_write
-
-    eff_input = inp + c_read * CACHE_READ_MULT + c_write * CACHE_WRITE_MULT
-    naive_input = input_total  # what the same input would cost with caching off
-    saved = naive_input - eff_input
-    cache_share = 100.0 * c_read / max(input_total, 1)
-    hit_rate = 100.0 * c_read / max(c_read + c_write, 1)
-
-    print(f"# REAL usage from {source} -- {len(recs)} assistant turn(s)")
-    print(f"  input, uncached    : {inp:>14,}")
-    print(f"  cache read  (0.1x) : {c_read:>14,}")
-    print(f"  cache write (1.25x): {c_write:>14,}")
-    print(f"  input total        : {input_total:>14,}")
-    print(f"  output             : {out:>14,}")
-    print(f"  cache-read share of input : {cache_share:5.1f}%   "
-          f"(higher = stable prefix is being reused)")
-    print(f"  cache hit rate read/(read+write) : {hit_rate:5.1f}%")
-    print(f"  effective input : {eff_input:>15,.0f} base-token-equiv "
-          f"(caching off would be {naive_input:,})")
-    print(f"  input saved by cache : {saved:>12,.0f} base-token-equiv "
-          f"({100.0 * saved / max(naive_input, 1):.1f}%)")
-    if args.in_price or args.out_price:
-        cost = eff_input / 1e6 * args.in_price + out / 1e6 * args.out_price
-        naive_cost = naive_input / 1e6 * args.in_price + out / 1e6 * args.out_price
-        print(f"  $ at ${args.in_price}/MTok in + ${args.out_price}/MTok out : "
-              f"${cost:.4f}   (caching off: ${naive_cost:.4f})")
-    print("# a low cache-read share means the prefix is being invalidated -- something")
-    print("# is editing context mid-session; rebuild the stable packet with `ctx pack`.")
+    _print_stats(_usage_stats(recs), source, args.in_price, args.out_price)
     return 0
 
 
@@ -1768,6 +1906,9 @@ def main(argv: list[str] | None = None) -> int:
     ms.add_argument("--usage-json", metavar="PATH",
                     help="API-mode usage: a JSON file (or - for stdin) of response "
                          "usage objects")
+    ms.add_argument("--compare", nargs=2, metavar=("A", "B"),
+                    help="A/B diff of two runs (baseline vs candidate); each arg is a "
+                         "transcript .jsonl file/dir or a .json usage dump")
     ms.add_argument("--in-price", type=float, default=0.0,
                     help="input $/MTok, to also print an effective dollar cost")
     ms.add_argument("--out-price", type=float, default=0.0,
