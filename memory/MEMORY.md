@@ -25,7 +25,7 @@
 
 ## Retrieval
 
-- Code relationships: `codegraph context "<task>"`
-- Broad memory question: `python ctx.py memory query "<question>"`
-- Broad project question: `python ctx.py memory query "<question>" --scope project`
+- Relevant durable notes (local, no LLM): `python ctx.py memory query "<question>"`
+- Broaden into project files: `python ctx.py memory query "<question>" --scope project`
+- Rebuild the cache-stable startup packet: `python ctx.py pack --out .ctx/startup-packet.md`
 - First bootstrap: `python ctx.py memory open --install-obsidian`

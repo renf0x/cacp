@@ -9,7 +9,6 @@ from pathlib import Path
 from unittest import mock
 
 import ctx
-import rlm
 
 
 class MemoryTests(unittest.TestCase):
@@ -21,7 +20,7 @@ class MemoryTests(unittest.TestCase):
         self.temp.cleanup()
 
     def init_memory(self):
-        args = argparse.Namespace(path=str(self.root), with_codegraph=False)
+        args = argparse.Namespace(path=str(self.root))
         self.assertEqual(ctx.cmd_memory_init(args), 0)
 
     def test_init_is_idempotent_and_preserves_content(self):
@@ -69,20 +68,52 @@ class MemoryTests(unittest.TestCase):
         self.assertEqual(len(archives), 1)
         self.assertIn("BUG-20260615-001", archives[0].read_text(encoding="utf-8"))
 
-    @mock.patch("ctx._run_codegraph")
-    def test_context_uses_limited_memory_and_codegraph(self, run_codegraph):
+    def test_context_bundles_memory_and_topk_notes(self):
         self.init_memory()
-        (self.root / ".codegraph").mkdir()
-        run_codegraph.side_effect = [
-            mock.Mock(returncode=0, stdout="", stderr=""),
-            mock.Mock(returncode=0, stdout="graph result", stderr=""),
-        ]
-        text = ctx._memory_context(self.root, "change progress", 30, 6)
+        # a durable decision that should surface via local top-k retrieval
+        (self.root / "memory" / "decisions.md").write_text(
+            "# Decision Log\n\n## DEC-1 Caching boundary\n\n"
+            "- Decision: keep the prompt prefix stable to preserve cache hits.\n",
+            encoding="utf-8",
+        )
+        text = ctx._memory_context(self.root, "prompt cache prefix stable")
         self.assertIn("memory/MEMORY.md", text)
         self.assertIn("handoff.md", text)
         self.assertIn("memory/project-rules.md", text)
-        self.assertIn("graph result", text)
+        self.assertIn("Relevant durable notes", text)
+        self.assertIn("prompt prefix stable", text)
         self.assertNotIn("archive", text)
+
+    def test_query_returns_local_topk_without_llm(self):
+        self.init_memory()
+        (self.root / "memory" / "investigations.md").write_text(
+            "# Investigations\n\n## INV-7 Token budget\n\n"
+            "- Findings: digest large files before reading them verbatim.\n",
+            encoding="utf-8",
+        )
+        args = argparse.Namespace(
+            path=str(self.root), scope="memory",
+            question="digest large files budget", top=5, json=False,
+        )
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ctx.cmd_memory_query(args), 0)
+        text = out.getvalue()
+        self.assertIn("investigations.md", text)
+        self.assertIn("digest large files", text)
+        self.assertIn("local retrieval, no LLM", text)
+
+    def test_query_project_scope_searches_repo_files(self):
+        self.init_memory()
+        (self.root / "app.py").write_text(
+            "def widget_renderer():\n    return 'unique_marker_xyz'\n", encoding="utf-8")
+        args = argparse.Namespace(
+            path=str(self.root), scope="project",
+            question="widget_renderer unique_marker_xyz", top=5, json=True,
+        )
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ctx.cmd_memory_query(args), 0)
+        data = json.loads(out.getvalue())
+        self.assertTrue(any(h["path"] == "app.py" for h in data["hits"]))
 
     @mock.patch("ctx._find_obsidian", return_value=None)
     def test_open_does_not_install_without_explicit_flag(self, find_obsidian):
@@ -108,26 +139,6 @@ class MemoryTests(unittest.TestCase):
         command = popen.call_args.args[0]
         self.assertEqual(command[0], "C:/Program Files/Obsidian/Obsidian.exe")
         self.assertEqual(command[1], "obsidian://open?vault=memory")
-
-    @mock.patch("ctx.cmd_rlm", return_value=0)
-    def test_query_routes_memory_scope_to_rlm(self, cmd_rlm):
-        self.init_memory()
-        args = argparse.Namespace(
-            path=str(self.root),
-            scope="memory",
-            question="what changed",
-            mode="mapreduce",
-            provider="fake",
-            model=None,
-            sub_model=None,
-            chunk_tokens=4000,
-            max_depth=1,
-            json=False,
-        )
-        self.assertEqual(ctx.cmd_memory_query(args), 0)
-        forwarded = cmd_rlm.call_args.args[0]
-        self.assertEqual(Path(forwarded.file), self.root / "memory")
-        self.assertEqual(forwarded.query, "what changed")
 
     @mock.patch("ctx.subprocess.Popen")
     @mock.patch("ctx.subprocess.run")
@@ -177,7 +188,7 @@ class MemoryTests(unittest.TestCase):
             memory = self.root / "memory"
             memory.mkdir()
             vault_id, created = ctx._register_obsidian_vault(memory)
-            data = __import__("json").loads(config.read_text(encoding="utf-8"))
+            data = json.loads(config.read_text(encoding="utf-8"))
             self.assertIn("existing", data["vaults"])
             self.assertEqual(len(vault_id), 16)
             self.assertTrue(created)
@@ -185,68 +196,6 @@ class MemoryTests(unittest.TestCase):
                 value["path"] == str(memory.resolve())
                 for value in data["vaults"].values()
             ))
-
-    @mock.patch.dict(os.environ, {}, clear=True)
-    @mock.patch("rlm.shutil.which", return_value=None)
-    @mock.patch("rlm.gemini_creds_path")
-    @mock.patch("rlm.codex_auth_path")
-    def test_provider_prefers_codex_oauth_credentials(
-        self, codex_auth_path, gemini_creds_path, which
-    ):
-        codex_auth_path.return_value = mock.Mock(is_file=lambda: True)
-        gemini_creds_path.return_value = mock.Mock(is_file=lambda: False)
-        self.assertEqual(rlm.pick_provider("auto"), "openai-oauth")
-
-    @mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-key"}, clear=True)
-    @mock.patch("rlm.shutil.which", return_value=None)
-    @mock.patch("rlm.gemini_creds_path")
-    @mock.patch("rlm.codex_auth_path")
-    def test_provider_auto_detects_openrouter(
-        self, codex_auth_path, gemini_creds_path, which
-    ):
-        codex_auth_path.return_value = mock.Mock(is_file=lambda: False)
-        gemini_creds_path.return_value = mock.Mock(is_file=lambda: False)
-        self.assertEqual(rlm.pick_provider("auto"), "openrouter")
-
-    @mock.patch.dict(os.environ, {
-        "OPENROUTER_API_KEY": "or-key",
-        "OPENROUTER_APP_TITLE": "ctx-test",
-    }, clear=True)
-    @mock.patch("rlm._http_json")
-    def test_openrouter_provider_sends_selected_model(self, http_json):
-        http_json.return_value = {
-            "choices": [{"message": {"content": "answer"}}],
-            "usage": {"prompt_tokens": 3, "completion_tokens": 1, "total_tokens": 4},
-        }
-
-        provider = rlm.resolve_provider(
-            "openrouter",
-            model="deepseek/deepseek-chat-v3.1",
-            sub_model="deepseek/deepseek-chat-v3.1",
-        )
-        self.assertEqual(provider.root("question"), "answer")
-
-        url, payload, headers = http_json.call_args.args
-        self.assertEqual(url, "https://openrouter.ai/api/v1/chat/completions")
-        self.assertEqual(payload["model"], "deepseek/deepseek-chat-v3.1")
-        self.assertEqual(payload["messages"][0]["content"], "question")
-        self.assertEqual(headers["Authorization"], "Bearer or-key")
-        self.assertEqual(headers["X-Title"], "ctx-test")
-
-    @mock.patch.dict(os.environ, {"OPENROUTER_API_KEY": "or-key"}, clear=True)
-    @mock.patch("rlm._http_json")
-    def test_openrouter_sub_model_defaults_to_selected_model(self, http_json):
-        http_json.return_value = {"choices": [{"message": {"content": "answer"}}]}
-
-        provider = rlm.resolve_provider(
-            "openrouter",
-            model="deepseek/deepseek-chat-v3.1",
-            sub_model=None,
-        )
-        self.assertEqual(provider.sub("chunk"), "answer")
-
-        payload = http_json.call_args.args[1]
-        self.assertEqual(payload["model"], "deepseek/deepseek-chat-v3.1")
 
     def test_rawcount_counts_directory_without_ledger(self):
         (self.root / "src").mkdir()
@@ -262,6 +211,106 @@ class MemoryTests(unittest.TestCase):
         self.assertIn("files: 1", output)
         self.assertIn("secret-looking files skipped: 1", output)
         self.assertFalse((self.root / ".ctx" / "ledger.jsonl").exists())
+
+
+class PackTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+        self._cwd = os.getcwd()
+        os.chdir(self.root)  # ledger is written to a cwd-relative .ctx
+
+    def tearDown(self):
+        os.chdir(self._cwd)
+        self.temp.cleanup()
+
+    def test_pack_is_deterministic_and_excludes_volatile_state(self):
+        ctx.cmd_memory_init(argparse.Namespace(path="."))
+        (self.root / "big.py").write_text("def a():\n    return 1\n" * 50, encoding="utf-8")
+        (self.root / "handoff.md").write_text(
+            "# Handoff\n\n## Now\n\nvolatile_task_marker\n", encoding="utf-8")
+        args = argparse.Namespace(path=".", top=40, warn=4000, digest=0,
+                                  out=None, quiet=False)
+
+        with contextlib.redirect_stdout(io.StringIO()) as out1:
+            self.assertEqual(ctx.cmd_pack(args), 0)
+        with contextlib.redirect_stdout(io.StringIO()) as out2:
+            self.assertEqual(ctx.cmd_pack(args), 0)
+
+        body1 = out1.getvalue().split("# packet")[0]
+        body2 = out2.getvalue().split("# packet")[0]
+        self.assertEqual(body1, body2)  # byte-stable prefix across runs
+        self.assertIn("PERMANENT RULES", body1)
+        self.assertIn("MEMORY INDEX", body1)
+        self.assertIn("REPO MAP", body1)
+        # volatile handoff must NOT be baked into the cache-stable prefix
+        self.assertNotIn("volatile_task_marker", body1)
+
+    def test_pack_digest_appends_structure_and_logs_recon(self):
+        (self.root / "mod.py").write_text(
+            "import os\n\ndef exported():\n    secret = 1\n    return secret\n",
+            encoding="utf-8")
+        args = argparse.Namespace(path=".", top=40, warn=4000, digest=1,
+                                  out="packet.md", quiet=True)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(ctx.cmd_pack(args), 0)
+        written = (self.root / "packet.md").read_text(encoding="utf-8")
+        self.assertIn("DIGEST: mod.py", written)
+        self.assertIn("def exported", written)
+        self.assertNotIn("secret = 1", written)  # body is dropped, only structure kept
+        recs = [json.loads(ln) for ln in
+                (self.root / ".ctx" / "ledger.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertIn("pack", [r["op"] for r in recs])
+
+
+class MeasureTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _write_transcript(self, usages):
+        path = self.root / "session.jsonl"
+        lines = [json.dumps({"type": "assistant", "message": {"usage": u}})
+                 for u in usages]
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    def test_measure_reads_real_usage_and_cache_rates(self):
+        transcript = self._write_transcript([
+            {"input_tokens": 100, "output_tokens": 50,
+             "cache_read_input_tokens": 900, "cache_creation_input_tokens": 0},
+            {"input_tokens": 100, "output_tokens": 50,
+             "cache_read_input_tokens": 800, "cache_creation_input_tokens": 100},
+        ])
+        args = argparse.Namespace(transcript=str(transcript), usage_json=None,
+                                  in_price=0.0, out_price=0.0)
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(ctx.cmd_measure(args), 0)
+        text = out.getvalue()
+        self.assertIn("2 assistant turn(s)", text)
+        self.assertIn("2,000", text)          # input total = 200 + 1700 + 100
+        self.assertIn("85.0%", text)          # cache-read share 1700/2000
+        self.assertIn("94.4%", text)          # hit rate 1700/1800
+
+    def test_measure_usage_json_from_stdin(self):
+        usage = [{"input_tokens": 10, "output_tokens": 5,
+                  "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}]
+        args = argparse.Namespace(transcript=None, usage_json="-",
+                                  in_price=3.0, out_price=15.0)
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(usage))):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(ctx.cmd_measure(args), 0)
+        self.assertIn("1 assistant turn(s)", out.getvalue())
+
+    def test_measure_reports_missing_usage_cleanly(self):
+        args = argparse.Namespace(transcript=str(self.root / "nope.jsonl"),
+                                  usage_json=None, in_price=0.0, out_price=0.0)
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(ctx.cmd_measure(args), 1)
+        self.assertIn("no usage records", err.getvalue())
 
 
 class LedgerTests(unittest.TestCase):
@@ -303,11 +352,10 @@ class LedgerTests(unittest.TestCase):
         self.assertIn("map", ops)
 
     def test_ledger_log_keeps_extra_fields_and_drops_none(self):
-        ctx.ledger_log("rlm", 100, 10, "q", provider="fake", model=None, calls=3)
+        ctx.ledger_log("pack", 100, 10, "q", files=3, digests=None)
         rec = self.ledger_records()[0]
-        self.assertEqual(rec["provider"], "fake")
-        self.assertEqual(rec["calls"], 3)
-        self.assertNotIn("model", rec)  # None extras are dropped
+        self.assertEqual(rec["files"], 3)
+        self.assertNotIn("digests", rec)  # None extras are dropped
         self.assertEqual(rec["v"], 2)
 
     def test_hook_logs_direct_pull_from_stdin(self):
@@ -354,7 +402,7 @@ class LedgerTests(unittest.TestCase):
         ctx.ledger_log("read", 100, 100, "f.txt")          # raw pull
         ctx.ledger_log("digest", 100, 20, "f.py")           # compressed pull
         ctx.ledger_log("map", 50000, 80, "/repo")           # recon, must not inflate %
-        ctx.ledger_log("rlm", 4000, 40, "mapreduce:q", provider="gemini", calls=5)
+        ctx.ledger_log("pack", 60000, 300, "/repo")         # recon, must not inflate %
         ctx.ledger_log("direct", 30, 30, "Read", tool_id="T9")
         ctx.ledger_log("direct", 30, 30, "Read", tool_id="T9")  # duplicate, must drop
         args = argparse.Namespace(price=5.0, reset=False, settle=0)
@@ -362,12 +410,11 @@ class LedgerTests(unittest.TestCase):
             self.assertEqual(ctx.cmd_report(args), 0)
         text = out.getvalue()
         self.assertIn("CONTENT FLOW", text)
-        self.assertIn("RECONNAISSANCE", text)               # map reported separately
+        self.assertIn("RECONNAISSANCE", text)               # map/pack reported separately
         self.assertIn("tracked file-content coverage", text)
-        # content saved = (100+100+4000+30) - (100+20+40+30) = 4040 of 4230 -> 95.5%
-        self.assertIn("95.5%", text)
+        # content saved = (100+100+30) - (100+20+30) = 80 of 230 -> 34.8%
+        self.assertIn("34.8%", text)
         self.assertIn("de-duplicated 1", text)              # the repeated T9 dropped
-        self.assertIn("gemini", text)                       # provider breakdown present
 
 
 if __name__ == "__main__":

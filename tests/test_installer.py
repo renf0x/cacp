@@ -15,7 +15,7 @@ class InstallerTests(unittest.TestCase):
                 result = install.main([str(project), "--agents", "all"])
             self.assertEqual(result, 0)
             self.assertTrue((project / "ctx.py").is_file())
-            self.assertTrue((project / "rlm.py").is_file())
+            self.assertFalse((project / "rlm.py").exists())
             self.assertTrue((project / "AGENT_CONTEXT.md").is_file())
             self.assertEqual(
                 (project / "AGENT_CONTEXT.md").read_text(encoding="utf-8"),
@@ -49,7 +49,6 @@ class InstallerTests(unittest.TestCase):
                 str(project),
                 "--agents",
                 "generic",
-                "--no-codegraph",
             ])
             self.assertEqual(result, 0)
             self.assertTrue((project / "memory" / "MEMORY.md").is_file())

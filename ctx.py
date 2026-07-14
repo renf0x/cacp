@@ -1,20 +1,32 @@
 #!/usr/bin/env python3
-"""ctx.py - Token-Value Ledger (TVL): context-budget toolkit for coding agents.
+"""ctx.py - CACP: the Cache-Aware Context Protocol for coding agents.
 
-Cross-harness prototype (Claude Code / Codex). Stdlib only; the `anthropic`
+Cross-harness (Claude Code / Codex / any agent). Stdlib only; the `anthropic`
 package is used opportunistically for exact token counts when available.
 
+The method has five pillars; the commands below implement them:
+  1. Stable prefix .... `pack`     -- one ordered, cache-friendly startup packet
+  2. Tiered admission . `map`/`digest`/`read`/`run` -- climb cheap->expensive
+  3. Durable memory ... `memory`   -- load-on-demand top-k notes, not the whole vault
+  4. Gated output ..... (template)  -- terse output only when it nets positive
+  5. Measured .........  `measure`/`report` -- real provider usage, not estimates
+
 Subcommands:
+  pack [path]         build a deterministic, cache-stable startup packet
   map [path]          repo map with per-file token estimates (what is expensive to read)
   digest <file>       structural digest of a file instead of a full read
   run -- <command>    run a noisy command, print only the salient extract; full log saved
+  read <file>         print a file verbatim and log it as uncompressed context
   count <file|->      token count of a file or stdin (exact via API if key present)
   rawcount <path|->   token count of unsqueezed text with no compression or ledger savings
+  memory ...          durable memory vault (init/check/context/query/rotate/...)
+  report              admitted-vs-avoided tokens from the local ledger (planning estimate)
+  measure             REAL billed tokens + cache-hit rate from provider usage logs
 """
 
 from __future__ import annotations
 
-__version__ = "0.0.3"
+__version__ = "0.1.0"
 
 import argparse
 import datetime
@@ -122,9 +134,9 @@ MEMORY_TEMPLATES = {
 
 ## Retrieval
 
-- Code relationships: `codegraph context "<task>"`
-- Broad memory question: `python ctx.py memory query "<question>"`
-- Broad project question: `python ctx.py memory query "<question>" --scope project`
+- Relevant durable notes (local, no LLM): `python ctx.py memory query "<question>"`
+- Broaden into project files: `python ctx.py memory query "<question>" --scope project`
+- Rebuild the cache-stable startup packet: `python ctx.py pack`
 - First bootstrap: `python ctx.py memory open --install-obsidian`
 """,
     "project-rules.md": """# Permanent Project Rules
@@ -199,7 +211,6 @@ MEMORY_TEMPLATES = {
     ".gitignore": "workspace.json\nworkspace-mobile.json\ncache\n",
 }
 ROOT_GITIGNORE_TEMPLATE = """.ctx/
-.codegraph/
 __pycache__/
 node_modules/
 dist/
@@ -249,7 +260,7 @@ RAW_OPS = frozenset({"read", "direct"})
 # than a real 1:1 content substitution. They stay in the per-op table for
 # visibility but are kept out of the headline savings % so it cannot be inflated
 # by a denominator the agent would never actually have paid.
-RECON_OPS = frozenset({"map"})
+RECON_OPS = frozenset({"map", "pack"})
 
 
 def ledger_log(op: str, raw_tok: int, kept_tok: int, detail: str,
@@ -281,9 +292,12 @@ def ledger_log(op: str, raw_tok: int, kept_tok: int, detail: str,
 
 # ----------------------------------------------------------------- map ----
 
-def cmd_map(args: argparse.Namespace) -> int:
-    root = Path(args.path).resolve()
-    rows: list[tuple[int, int, str]] = []  # (tokens, lines, relpath)
+def _scan_repo(root: Path) -> tuple[list[tuple[int, int, str]], int, int]:
+    """Walk the repo once. Return (rows, total_tokens, skipped) where each row is
+    (tokens, lines, relpath), sorted most-expensive first. Deterministic: the
+    same tree always yields the same order, which is what keeps `pack` output
+    byte-stable across turns so the agent's prompt cache stays hot."""
+    rows: list[tuple[int, int, str]] = []
     total_tokens = 0
     skipped = 0
     for dirpath, dirnames, filenames in os.walk(root):
@@ -304,27 +318,118 @@ def cmd_map(args: argparse.Namespace) -> int:
                 continue
             tok = est_tokens(text)
             total_tokens += tok
-            rows.append((tok, text.count("\n") + 1, str(p.relative_to(root))))
-
+            rows.append((tok, text.count("\n") + 1, relpath))
     rows.sort(reverse=True)
+    return rows, total_tokens, skipped
+
+
+def _render_map(root: Path, rows: list[tuple[int, int, str]], total_tokens: int,
+                skipped: int, top: int, warn: int, show_all: bool) -> str:
     out: list[str] = []
     out.append(f"# repo map: {root}")
     out.append(f"# files: {len(rows)} (skipped {skipped} binary/unreadable), "
                f"~{total_tokens:,} tokens total to read everything")
     out.append(f"{'~tokens':>9}  {'lines':>6}  path")
-    shown = rows if args.all else rows[: args.top]
+    shown = rows if show_all else rows[:top]
     for tok, lines, rel in shown:
-        flag = "  <- EXPENSIVE, prefer `ctx.py digest`" if tok >= args.warn else ""
+        flag = "  <- EXPENSIVE, prefer `ctx.py digest`" if tok >= warn else ""
         out.append(f"{tok:>9,}  {lines:>6}  {rel}{flag}")
-    if not args.all and len(rows) > args.top:
-        rest = sum(t for t, _, _ in rows[args.top:])
-        out.append(f"      ...   {len(rows) - args.top} more files, ~{rest:,} tokens (use --all)")
-    rendered = "\n".join(out)
+    if not show_all and len(rows) > top:
+        rest = sum(t for t, _, _ in rows[top:])
+        out.append(f"      ...   {len(rows) - top} more files, ~{rest:,} tokens (use --all)")
+    return "\n".join(out)
+
+
+def cmd_map(args: argparse.Namespace) -> int:
+    root = Path(args.path).resolve()
+    rows, total_tokens, skipped = _scan_repo(root)
+    rendered = _render_map(root, rows, total_tokens, skipped,
+                           args.top, args.warn, args.all)
     # Orienting via the map costs the printed listing instead of reading every
     # file; log that gap so recon shows up in the savings report too.
     ledger_log("map", total_tokens, est_tokens(rendered), str(root),
                files=len(rows))
     print(rendered)
+    return 0
+
+
+# ----------------------------------------------------------------- pack ----
+
+def _digest_text(p: Path) -> str:
+    """Structural digest of a single file, shared by `digest` and `pack`."""
+    text = read_text(p)
+    if p.suffix == ".py":
+        kept = digest_python(text)
+    else:
+        kept = [ln.rstrip() for ln in text.splitlines() if GENERIC_KEEP.match(ln)]
+        if not kept:
+            ls = text.splitlines()
+            kept = ls[:15] + (["..."] + ls[-5:] if len(ls) > 20 else [])
+    return "\n".join(kept)
+
+
+def cmd_pack(args: argparse.Namespace) -> int:
+    """Pillar 1: emit ONE deterministic, cache-stable startup packet.
+
+    Order is most-stable first so the agent's cacheable prompt prefix stays
+    byte-identical across turns (rules rarely change; the map changes only when
+    files are added; digests change with code). Volatile state (handoff, the
+    current task) is deliberately excluded -- append that AFTER this packet so it
+    never invalidates the cached prefix. On the API this bills the repeated
+    prefix at 0.1x; on a subscription it keeps the auto-cache hot and shrinks the
+    admitted context. There are no timestamps in the body on purpose."""
+    root = Path(args.path).resolve()
+    memory = root / "memory"
+    sections: list[str] = []
+
+    # 1. Durable rules (most stable).
+    rules = memory / "project-rules.md"
+    if rules.is_file():
+        sections.append(f"===== PERMANENT RULES (memory/project-rules.md) =====\n"
+                        f"{read_text(rules).strip()}")
+
+    # 2. Memory index (thin, fairly stable).
+    index = memory / "MEMORY.md"
+    if index.is_file():
+        sections.append(f"===== MEMORY INDEX (memory/MEMORY.md) =====\n"
+                        f"{read_text(index).strip()}")
+
+    # 3. Repo map (changes only when files are added/removed).
+    rows, total_tokens, skipped = _scan_repo(root)
+    map_text = _render_map(root, rows, total_tokens, skipped,
+                           args.top, args.warn, show_all=False)
+    sections.append(f"===== REPO MAP =====\n{map_text}")
+
+    # 4. Optional digests of the top-K most expensive files.
+    for _tok, _lines, rel in rows[: max(0, args.digest)]:
+        p = root / rel
+        try:
+            sections.append(f"===== DIGEST: {rel} =====\n{_digest_text(p)}")
+        except OSError:
+            continue
+
+    header = ("# CACP startup packet -- cache-stable prefix.\n"
+              "# Read this ONCE at session start. Append the task/handoff AFTER it;\n"
+              "# do NOT edit this block mid-session or the prompt cache is invalidated.")
+    packet = header + "\n\n" + "\n\n".join(sections) + "\n"
+    packet_tok = est_tokens(packet)
+
+    if args.out:
+        out_path = Path(args.out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(packet, encoding="utf-8")
+
+    # Recon-style ledger record: the packet stands in for reading the whole repo.
+    ledger_log("pack", total_tokens, packet_tok, str(root),
+               files=len(rows), digests=max(0, args.digest))
+    if args.quiet and args.out:
+        print(f"# wrote {args.out}: ~{packet_tok:,} tokens "
+              f"(vs ~{total_tokens:,} to read the whole repo)")
+    else:
+        sys.stdout.write(packet)
+        print(f"# packet ~{packet_tok:,} tokens vs ~{total_tokens:,} to read everything "
+              f"({total_tokens / max(packet_tok, 1):.1f}x smaller startup baseline)"
+              + (f"; written to {args.out}" if args.out else ""))
     return 0
 
 
@@ -369,16 +474,8 @@ def cmd_digest(args: argparse.Namespace) -> int:
     if not p.is_file():
         sys.stderr.write(f"[ctx] not a file: {p}\n")
         return 2
-    text = read_text(p)
-    full_tok = est_tokens(text)
-    if p.suffix == ".py":
-        kept = digest_python(text)
-    else:
-        kept = [ln.rstrip() for ln in text.splitlines() if GENERIC_KEEP.match(ln)]
-        if not kept:  # unknown structure: head + tail beats nothing
-            ls = text.splitlines()
-            kept = ls[:15] + (["..."] + ls[-5:] if len(ls) > 20 else [])
-    digest = "\n".join(kept)
+    full_tok = est_tokens(read_text(p))
+    digest = _digest_text(p)
     dig_tok = est_tokens(digest)
     ledger_log("digest", full_tok, dig_tok, str(p))
     print(f"# digest of {p} -- ~{dig_tok:,} tokens instead of ~{full_tok:,} "
@@ -470,15 +567,15 @@ def cmd_read(args: argparse.Namespace) -> int:
     if text and not text.endswith("\n"):
         sys.stdout.write("\n")
     print(f"# read {p} verbatim -- ~{tok:,} tokens admitted uncompressed "
-          f"(prefer `ctx.py digest` for structure or `rlm` for an answer)")
+          f"(prefer `ctx.py digest` for structure, or `ctx.py memory query` to reuse a note)")
     return 0
 
 
-# A Bash call that itself invokes ctx/rlm already writes its own ledger record
-# (digest/run/read/rlm). Counting the Bash tool_response on top would double-count
+# A Bash call that itself invokes ctx already writes its own ledger record
+# (digest/run/read/pack). Counting the Bash tool_response on top would double-count
 # the same content as a raw "direct" pull, so the hook skips these.
 _CTX_SELFCALL_RE = re.compile(
-    r"(^|[|&;(\n]\s*)(ctx|rlm)\b|(^|[|&;(\n]\s*)(python\d?|py)\s+\S*(ctx|rlm)\.py\b")
+    r"(^|[|&;(\n]\s*)ctx\b|(^|[|&;(\n]\s*)(python\d?|py)\s+\S*ctx\.py\b")
 
 
 def _is_ctx_selfcall(command: str) -> bool:
@@ -528,7 +625,7 @@ def cmd_hook(args: argparse.Namespace) -> int:
         event = json.loads(sys.stdin.read() or "{}")
         if not isinstance(event, dict):
             return 0
-        # Skip ctx/rlm's own Bash invocations: those already self-log, so
+        # Skip ctx's own Bash invocations: those already self-log, so
         # counting their output here would double-count the same content.
         if str(event.get("tool_name", "")) == "Bash":
             cmd = (event.get("tool_input") or {}).get("command", "")
@@ -549,8 +646,8 @@ def cmd_hook(args: argparse.Namespace) -> int:
 def cmd_rawcount(args: argparse.Namespace) -> int:
     """Report the full unsqueezed context size for a file, directory, or stdin.
 
-    Unlike digest/run/rlm this does not compress, summarize, send content to an
-    LLM, or write savings records. It is a baseline meter for A/B comparisons.
+    Unlike digest/run this does not compress, summarize, or write savings
+    records. It is a baseline meter for A/B comparisons.
     """
     skipped_secrets: list[str] = []
     if args.path == "-":
@@ -616,25 +713,6 @@ def _write_rules_digest(memory: Path) -> None:
     (memory / ".rules.sha256").write_text(_rules_digest(rules) + "\n", encoding="utf-8")
 
 
-def _run_codegraph(command: list[str], cwd: Path) -> subprocess.CompletedProcess[str] | None:
-    exe = shutil.which("codegraph")
-    if not exe:
-        sys.stderr.write("[ctx] codegraph not found; continuing without code graph\n")
-        return None
-    try:
-        return subprocess.run(
-            [exe, *command],
-            cwd=cwd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-        )
-    except OSError as exc:
-        sys.stderr.write(f"[ctx] codegraph unavailable ({exc}); continuing\n")
-        return None
-
-
 def cmd_memory_init(args: argparse.Namespace) -> int:
     root = _project_root(args.path)
     memory = root / "memory"
@@ -672,11 +750,6 @@ def cmd_memory_init(args: argparse.Namespace) -> int:
     if not checksum.exists():
         _write_rules_digest(memory)
         created.append("memory/.rules.sha256")
-
-    if args.with_codegraph and not (root / ".codegraph").exists():
-        proc = _run_codegraph(["init", "-i", str(root)], root)
-        if proc and proc.returncode != 0:
-            sys.stderr.write(f"[ctx] codegraph init failed: {proc.stderr.strip()[:300]}\n")
 
     print(f"# memory initialized at {memory}")
     print("# created: " + (", ".join(created) if created else "nothing (already initialized)"))
@@ -754,25 +827,103 @@ def cmd_memory_check(args: argparse.Namespace) -> int:
     return 1 if issues else 0
 
 
-def _memory_context(root: Path, task: str, max_nodes: int, max_code: int) -> str:
+# ------------------------------------------------------ local retrieval ----
+# Pillar 3: LLM-free, network-free top-k retrieval over durable notes (and,
+# on demand, the whole project). It replaces the old RLM sub-agent call for the
+# common "what do we already know about X" question: no provider, no keys, no
+# extra token spend -- the agent loads only the few blocks it needs.
+
+_WORD_RE = re.compile(r"[A-Za-z0-9_]+")
+
+
+def _tokenize(text: str) -> list[str]:
+    return [w.lower() for w in _WORD_RE.findall(text)]
+
+
+def _split_blocks(text: str) -> list[tuple[str, str]]:
+    """Split a note into (heading, block) chunks on markdown headers so a hit
+    points the agent at a section, not a whole file."""
+    blocks: list[tuple[str, str]] = []
+    heading = ""
+    buf: list[str] = []
+    for line in text.splitlines():
+        m = re.match(r"^#{1,3}\s+(.*)", line)
+        if m:
+            if any(b.strip() for b in buf):
+                blocks.append((heading, "\n".join(buf).strip()))
+            heading = m.group(1).strip()
+            buf = [line]
+        else:
+            buf.append(line)
+    if any(b.strip() for b in buf):
+        blocks.append((heading, "\n".join(buf).strip()))
+    return blocks
+
+
+def _iter_search_files(root: Path, memory_only: bool):
+    if memory_only:
+        base = root / "memory" if (root / "memory").is_dir() else root
+        for note in sorted(base.rglob("*.md")):
+            if "archive" in note.relative_to(base).parts:
+                continue
+            yield note
+        return
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+        for name in sorted(filenames):
+            p = Path(dirpath) / name
+            if p.suffix.lower() in BINARY_EXT or _looks_secret(name):
+                continue
+            yield p
+
+
+def _retrieve(root: Path, query: str, top: int,
+              memory_only: bool) -> list[tuple[float, str, str, str]]:
+    """Return the top-k (score, relpath, heading, block) matches for a query.
+
+    Scoring is query-term frequency normalized by sqrt(block length): a short,
+    on-topic block outranks a long one that mentions the term once. Deterministic
+    and cheap -- no model, no network."""
+    qterms = set(_tokenize(query))
+    if not qterms:
+        return []
+    scored: list[tuple[float, str, str, str]] = []
+    for path in _iter_search_files(root, memory_only):
+        rel = path.relative_to(root).as_posix()
+        try:
+            text = read_text(path)
+        except OSError:
+            continue
+        for heading, block in _split_blocks(text):
+            words = _tokenize(block)
+            hits = sum(1 for w in words if w in qterms)
+            if not hits:
+                continue
+            score = hits / (len(words) ** 0.5)
+            scored.append((score, rel, heading, block))
+    scored.sort(key=lambda t: (t[0], t[1]), reverse=True)
+    return scored[:top]
+
+
+def _render_hits(hits: list[tuple[float, str, str, str]]) -> str:
+    out: list[str] = []
+    for _score, rel, heading, block in hits:
+        loc = rel + (f" # {heading}" if heading else "")
+        snippet = block if len(block) <= 800 else block[:800].rstrip() + " ..."
+        out.append(f"----- {loc} -----\n{snippet}")
+    return "\n\n".join(out)
+
+
+def _memory_context(root: Path, task: str) -> str:
     memory = root / "memory"
     parts = [f"# Task\n\n{task}"]
     for path in (memory / "MEMORY.md", root / "handoff.md", memory / "project-rules.md"):
         if path.is_file():
             parts.append(f"# {path.relative_to(root).as_posix()}\n\n{read_text(path)}")
 
-    if (root / ".codegraph").exists():
-        sync = _run_codegraph(["sync", str(root)], root)
-        if sync and sync.returncode != 0:
-            sys.stderr.write(f"[ctx] codegraph sync failed: {sync.stderr.strip()[:300]}\n")
-        graph = _run_codegraph([
-            "context", task, "--path", str(root),
-            "--max-nodes", str(max_nodes), "--max-code", str(max_code),
-        ], root)
-        if graph and graph.returncode == 0 and graph.stdout.strip():
-            parts.append("# CodeGraph context\n\n" + graph.stdout.strip())
-        elif graph and graph.returncode != 0:
-            sys.stderr.write(f"[ctx] codegraph context failed: {graph.stderr.strip()[:300]}\n")
+    hits = _retrieve(root, task, top=5, memory_only=True)
+    if hits:
+        parts.append("# Relevant durable notes (top-k retrieval)\n\n" + _render_hits(hits))
     return "\n\n".join(parts).strip() + "\n"
 
 
@@ -799,7 +950,7 @@ def _memory_vault_tokens(root: Path) -> int:
 
 def cmd_memory_context(args: argparse.Namespace) -> int:
     root = _project_root(args.path)
-    text = _memory_context(root, args.task, args.max_nodes, args.max_code)
+    text = _memory_context(root, args.task)
     kept = est_tokens(text)
     # Conservative denominator: the memory vault, not the whole repo — distilling
     # a task context beats re-reading every note at session start.
@@ -811,24 +962,32 @@ def cmd_memory_context(args: argparse.Namespace) -> int:
 
 
 def cmd_memory_query(args: argparse.Namespace) -> int:
+    """Pillar 3: local, LLM-free top-k retrieval over durable notes.
+
+    Returns the most relevant note blocks (or, with --scope project, the most
+    relevant file blocks across the repo) so the agent loads only what it needs
+    instead of re-reading the whole vault or spending a sub-agent call. No
+    network, no provider, no API keys."""
     root = _project_root(args.path)
-    target = root / "memory" if args.scope == "memory" else root
-    rlm_args = argparse.Namespace(
-        file=str(target),
-        query=args.question,
-        mode=args.mode,
-        engine="ours",
-        provider=args.provider,
-        model=args.model,
-        sub_model=args.sub_model,
-        chunk_tokens=args.chunk_tokens,
-        max_depth=args.max_depth,
-        no_prefilter=False,
-        graph=None,
-        include_secrets=False,
-        json=args.json,
-    )
-    return cmd_rlm(rlm_args)
+    hits = _retrieve(root, args.question, top=args.top,
+                     memory_only=(args.scope == "memory"))
+    if args.json:
+        print(json.dumps({
+            "query": args.question,
+            "scope": args.scope,
+            "hits": [{"score": round(s, 4), "path": rel, "heading": h,
+                      "snippet": b[:800]} for s, rel, h, b in hits],
+        }, ensure_ascii=False, indent=2))
+        return 0
+    if not hits:
+        print(f"# no matching {'notes' if args.scope == 'memory' else 'files'} "
+              f"for: {args.question!r}")
+        return 0
+    rendered = _render_hits(hits)
+    print(rendered)
+    print(f"\n# {len(hits)} block(s), ~{est_tokens(rendered):,} tokens "
+          f"(local retrieval, no LLM)")
+    return 0
 
 
 def _entry_is_closed(entry: str) -> bool:
@@ -1044,9 +1203,9 @@ def cmd_memory_open(args: argparse.Namespace) -> int:
     return 0
 
 
-# ------------------------------------------------------------------ rlm ----
+# ------------------------------------------------------------- rawcount ----
 
-# Files that usually hold secrets - never sent to an LLM unless --include-secrets.
+# Files that usually hold secrets - excluded from directory scans by default.
 SECRET_RE = re.compile(
     r"(^\.env($|\.)|(^|\.)(pem|key|p12|pfx)$|id_rsa|id_ed25519|^\.npmrc$|"
     r"credentials.*\.json$|oauth_creds\.json$|secret|\.pem$)",
@@ -1088,84 +1247,6 @@ def collect_context(root: Path, include_secrets: bool = False) -> tuple[int, int
     return "".join(parts), nfiles, skipped_secrets
 
 
-def cmd_rlm(args: argparse.Namespace) -> int:
-    """Answer a query over a huge file or whole directory via a Recursive Language
-    Model: the content never enters the agent's context, only the short answer does."""
-    import rlm  # local module; imported lazily so `map`/`digest`/`run` stay light
-
-    if args.file == "-":
-        context = sys.stdin.read()
-    else:
-        p = Path(args.file)
-        if p.is_dir():
-            context, nfiles, secrets = collect_context(p, include_secrets=args.include_secrets)
-            sys.stderr.write(f"[ctx] collected {nfiles} files (~{est_tokens(context):,} tokens) "
-                             f"from {p}\n")
-            if secrets:
-                sys.stderr.write(f"[ctx] excluded {len(secrets)} secret-looking file(s) "
-                                 f"(e.g. {', '.join(secrets[:3])}); use --include-secrets to override\n")
-        elif p.is_file():
-            context = read_text(p)
-        else:
-            sys.stderr.write(f"[ctx] not a file or directory: {p}\n")
-            return 2
-
-    cfg = rlm.RLMConfig(mode=args.mode, chunk_tokens=args.chunk_tokens,
-                        max_depth=args.max_depth, prefilter=not args.no_prefilter)
-    try:
-        resolved = args.provider if args.provider == "fake" else rlm.pick_provider(args.provider)
-        if args.provider == "auto":
-            sys.stderr.write(f"[ctx] auto-selected provider: {resolved}\n")
-        # one-command UX: if Gemini subscription is requested but not logged in yet,
-        # bootstrap the OAuth browser flow automatically, then continue.
-        if resolved == "gemini-oauth" and not rlm.gemini_creds_path().is_file():
-            sys.stderr.write("[ctx] no Gemini login yet - opening browser to authorize...\n")
-            rlm.gemini_login()
-        if args.engine == "official":
-            result = rlm.run_official(context, args.query, args.provider, args.model, cfg)
-        else:
-            fake_fn = rlm.demo_llm if args.provider == "fake" else None
-            provider = rlm.resolve_provider(args.provider, args.model, args.sub_model,
-                                            fake=fake_fn)
-            graph = rlm.Graph.load(args.graph) if args.graph else None
-            result = rlm.rlm_query(context, args.query, provider, cfg, graph,
-                                   provider_name=resolved, model=args.model)
-    except Exception as exc:  # backend/SDK/CLI problems must report cleanly
-        sys.stderr.write(f"[ctx] rlm failed: {exc}\n")
-        return 1
-
-    if args.json:
-        print(json.dumps({
-            "answer": result.answer, "calls": result.calls,
-            "context_tokens": result.context_tokens,
-            "answer_tokens": result.answer_tokens,
-            "trajectory": result.trajectory,
-        }, ensure_ascii=False, indent=2))
-        return 0
-
-    print(result.answer)
-    ratio = result.context_tokens / max(result.answer_tokens, 1)
-    prov = resolved if resolved == args.provider else f"{args.provider}->{resolved}"
-    print(f"\n# rlm {args.engine}/{cfg.mode} | {result.calls} sub-LM calls | "
-          f"~{result.context_tokens:,} -> ~{result.answer_tokens:,} tokens to the agent "
-          f"({ratio:.1f}x) | provider={prov}")
-    return 0
-
-
-# ------------------------------------------------------------ gemini-login ----
-
-def cmd_gemini_login(args: argparse.Namespace) -> int:
-    import rlm
-    try:
-        path = rlm.gemini_login()
-    except Exception as exc:
-        sys.stderr.write(f"[ctx] gemini-login failed: {exc}\n")
-        return 1
-    print(f"# Gemini subscription creds saved to {path}")
-    print("# now run, e.g.:  python ctx.py rlm <file> --query \"...\" --provider gemini-oauth")
-    return 0
-
-
 # -------------------------------------------------------------- report ----
 
 def cmd_report(args: argparse.Namespace) -> int:
@@ -1185,7 +1266,6 @@ def cmd_report(args: argparse.Namespace) -> int:
         time.sleep(max(0, args.settle) / 1000.0)
 
     by_op: dict[str, dict[str, int]] = {}
-    by_provider: dict[str, dict[str, int]] = {}
     seen_ids: set[str] = set()
     bad = dup = 0
     for line in LEDGER_PATH.read_text(encoding="utf-8").splitlines():
@@ -1204,22 +1284,15 @@ def cmd_report(args: argparse.Namespace) -> int:
             agg["n"] += 1
             agg["raw"] += raw
             agg["kept"] += kept
-            prov = rec.get("provider")
-            if prov:
-                pa = by_provider.setdefault(str(prov),
-                                            {"n": 0, "raw": 0, "kept": 0, "calls": 0})
-                pa["n"] += 1
-                pa["raw"] += raw
-                pa["kept"] += kept
-                pa["calls"] += int(rec.get("calls", 0) or 0)
         except (json.JSONDecodeError, KeyError, ValueError):
             bad += 1
 
     content = {op: a for op, a in by_op.items() if op not in RECON_OPS}
     recon = {op: a for op, a in by_op.items() if op in RECON_OPS}
 
-    print("# savings report -- computed by ctx.py from .ctx/ledger.jsonl,")
-    print("# NOT model-estimated. Heuristic token counts (chars/3.5).")
+    print("# ledger report -- computed by ctx.py from .ctx/ledger.jsonl,")
+    print("# NOT model-estimated. Heuristic token counts (chars/3.5) -- this is an")
+    print("# input-side PLANNING estimate. For REAL billed tokens run `ctx measure`.")
 
     # --- CONTENT FLOW: real file content pulled for the task --------------
     # This is the honest, headline result. `read`/`direct` ops (raw == kept)
@@ -1266,22 +1339,134 @@ def cmd_report(args: argparse.Namespace) -> int:
             a = recon[op]
             print(f"  {op:<10} repo estimate {a['raw']:>12,} -> output {a['kept']:>8,} "
                   f"({a['n']} call{'s' if a['n'] != 1 else ''})")
-        print("  note: map lists the repo without reading it; its huge ratio is not a")
-        print("        real saving and is kept out of the CONTENT FLOW headline.")
+        print("  note: map/pack list the repo without reading it; their huge ratio is")
+        print("        not a real saving and is kept out of the CONTENT FLOW headline.")
 
     print("\n# coverage tracks Read/Bash via the ctx hook; Grep/Glob/MCP/sub-agent")
     print("# outputs are not yet counted, so true total context may be higher.")
-
-    if by_provider:
-        print(f"\n{'rlm provider':<16} {'calls':>6} {'sub-LM':>7} {'context tok':>12} "
-              f"{'answer tok':>11}")
-        for prov in sorted(by_provider):
-            p = by_provider[prov]
-            print(f"{prov:<16} {p['n']:>6} {p['calls']:>7} {p['raw']:>12,} {p['kept']:>11,}")
+    print("# these are planning estimates -- confirm dollars/limits with `ctx measure`.")
     if dup:
         print(f"# de-duplicated {dup} repeated tool_use_id record(s)")
     if bad:
         print(f"# warning: {bad} malformed ledger line(s) skipped")
+    return 0
+
+
+# ------------------------------------------------------------- measure ----
+
+# Real per-turn input multipliers on the Anthropic API, relative to the base
+# input price: a cache READ bills at 0.1x and a 5-minute cache WRITE at 1.25x.
+# Output bills at the separate output price. These are the levers a stable
+# prefix (`pack`) pulls on; `measure` reports what they actually did.
+CACHE_READ_MULT = 0.1
+CACHE_WRITE_MULT = 1.25
+USAGE_KEYS = ("input_tokens", "output_tokens",
+              "cache_read_input_tokens", "cache_creation_input_tokens")
+
+
+def _usage_from_transcript(path: Path) -> list[dict]:
+    """Pull per-message usage dicts out of a Claude Code transcript JSONL file.
+    Each assistant message carries `message.usage` with the input/output and the
+    two cache fields. Non-JSON / non-usage lines are skipped."""
+    records: list[dict] = []
+    for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        msg = obj.get("message")
+        usage = msg.get("usage") if isinstance(msg, dict) else obj.get("usage")
+        if isinstance(usage, dict) and any(k in usage for k in USAGE_KEYS):
+            records.append(usage)
+    return records
+
+
+def _default_transcript_dir() -> Path:
+    """Claude Code stores transcripts under ~/.claude/projects/<slug>/, where the
+    slug is the absolute project path with non-alphanumerics replaced by '-'."""
+    slug = re.sub(r"[^A-Za-z0-9]", "-", str(Path.cwd().resolve()))
+    return Path.home() / ".claude" / "projects" / slug
+
+
+def _collect_usage(args: argparse.Namespace) -> tuple[list[dict], str]:
+    if args.usage_json:
+        raw = (sys.stdin.read() if args.usage_json == "-"
+               else Path(args.usage_json).read_text(encoding="utf-8"))
+        data = json.loads(raw)
+        if isinstance(data, dict):
+            data = data.get("usage", data)
+        items = data if isinstance(data, list) else [data]
+        return [u for u in items if isinstance(u, dict)], f"usage-json:{args.usage_json}"
+    src = Path(args.transcript) if args.transcript else _default_transcript_dir()
+    if src.is_file():
+        files = [src]
+    elif src.is_dir():
+        files = sorted(src.glob("*.jsonl"))
+    else:
+        return [], f"transcript:{src} (not found)"
+    recs: list[dict] = []
+    for f in files:
+        recs.extend(_usage_from_transcript(f))
+    return recs, f"transcript:{src}"
+
+
+def cmd_measure(args: argparse.Namespace) -> int:
+    """Pillar 5: report REAL billed tokens + cache-hit rate from provider usage.
+
+    Reads actual usage -- Claude Code transcript JSONL (subscription) or an API
+    usage dump (pay-per-token) -- and never estimates. Shows how much input was
+    served from cache (the lever a stable `pack` prefix pulls on) and the
+    effective input cost under the real cache multipliers."""
+    try:
+        recs, source = _collect_usage(args)
+    except (OSError, json.JSONDecodeError) as exc:
+        sys.stderr.write(f"[ctx] measure: could not read usage ({exc})\n")
+        return 1
+    if not recs:
+        sys.stderr.write(
+            f"[ctx] measure: no usage records found ({source}).\n"
+            "  subscription: pass --transcript <file.jsonl>, or run inside the\n"
+            "    project dir so ~/.claude/projects/<slug>/ is auto-detected.\n"
+            "  API: pipe response usage JSON with `--usage-json -` or `--usage-json <file>`.\n")
+        return 1
+
+    def total(key: str) -> int:
+        return sum(int(u.get(key, 0) or 0) for u in recs)
+
+    inp, out = total("input_tokens"), total("output_tokens")
+    c_read, c_write = total("cache_read_input_tokens"), total("cache_creation_input_tokens")
+    input_total = inp + c_read + c_write
+
+    eff_input = inp + c_read * CACHE_READ_MULT + c_write * CACHE_WRITE_MULT
+    naive_input = input_total  # what the same input would cost with caching off
+    saved = naive_input - eff_input
+    cache_share = 100.0 * c_read / max(input_total, 1)
+    hit_rate = 100.0 * c_read / max(c_read + c_write, 1)
+
+    print(f"# REAL usage from {source} -- {len(recs)} assistant turn(s)")
+    print(f"  input, uncached    : {inp:>14,}")
+    print(f"  cache read  (0.1x) : {c_read:>14,}")
+    print(f"  cache write (1.25x): {c_write:>14,}")
+    print(f"  input total        : {input_total:>14,}")
+    print(f"  output             : {out:>14,}")
+    print(f"  cache-read share of input : {cache_share:5.1f}%   "
+          f"(higher = stable prefix is being reused)")
+    print(f"  cache hit rate read/(read+write) : {hit_rate:5.1f}%")
+    print(f"  effective input : {eff_input:>15,.0f} base-token-equiv "
+          f"(caching off would be {naive_input:,})")
+    print(f"  input saved by cache : {saved:>12,.0f} base-token-equiv "
+          f"({100.0 * saved / max(naive_input, 1):.1f}%)")
+    if args.in_price or args.out_price:
+        cost = eff_input / 1e6 * args.in_price + out / 1e6 * args.out_price
+        naive_cost = naive_input / 1e6 * args.in_price + out / 1e6 * args.out_price
+        print(f"  $ at ${args.in_price}/MTok in + ${args.out_price}/MTok out : "
+              f"${cost:.4f}   (caching off: ${naive_cost:.4f})")
+    print("# a low cache-read share means the prefix is being invalidated -- something")
+    print("# is editing context mid-session; rebuild the stable packet with `ctx pack`.")
     return 0
 
 
@@ -1307,6 +1492,20 @@ def main(argv: list[str] | None = None) -> int:
     m.add_argument("--all", action="store_true", help="show every file")
     m.add_argument("--warn", type=int, default=4000, help="flag files above N tokens")
     m.set_defaults(fn=cmd_map)
+
+    pk = sub.add_parser(
+        "pack",
+        help="build a deterministic, cache-stable startup packet (pillar 1)")
+    pk.add_argument("path", nargs="?", default=".")
+    pk.add_argument("--top", type=int, default=40, help="files listed in the repo map")
+    pk.add_argument("--warn", type=int, default=4000, help="flag files above N tokens")
+    pk.add_argument("--digest", type=int, default=0, metavar="K",
+                    help="also append structural digests of the K most expensive files")
+    pk.add_argument("--out", metavar="PATH",
+                    help="also write the packet to PATH (e.g. .ctx/startup-packet.md)")
+    pk.add_argument("--quiet", action="store_true",
+                    help="with --out, print only a one-line summary instead of the packet")
+    pk.set_defaults(fn=cmd_pack)
 
     d = sub.add_parser("digest", help="structural digest of a file")
     d.add_argument("file")
@@ -1351,7 +1550,6 @@ def main(argv: list[str] | None = None) -> int:
 
     mem_init = mem_sub.add_parser("init", help="create missing memory vault files")
     mem_init.add_argument("path", nargs="?", default=".")
-    mem_init.add_argument("--with-codegraph", action="store_true")
     mem_init.set_defaults(fn=cmd_memory_init)
 
     mem_check = mem_sub.add_parser("check", help="validate memory structure and rules")
@@ -1362,26 +1560,15 @@ def main(argv: list[str] | None = None) -> int:
     mem_context = mem_sub.add_parser("context", help="build a small task context")
     mem_context.add_argument("task")
     mem_context.add_argument("--path", default=".")
-    mem_context.add_argument("--max-nodes", type=int, default=30)
-    mem_context.add_argument("--max-code", type=int, default=6)
     mem_context.set_defaults(fn=cmd_memory_context)
 
-    mem_query = mem_sub.add_parser("query", help="ask RLM about memory or the project")
+    mem_query = mem_sub.add_parser(
+        "query", help="local top-k retrieval over durable notes (no LLM, no keys)")
     mem_query.add_argument("question")
     mem_query.add_argument("--path", default=".")
-    mem_query.add_argument("--scope", choices=["memory", "project"], default="memory")
-    mem_query.add_argument("--provider",
-                           choices=["auto", "api", "cli", "gemini", "gemini-oauth",
-                                    "gemini-cli", "openai", "openrouter",
-                                    "codex", "openai-oauth", "fake"],
-                           default="auto")
-    mem_query.add_argument("--model", default=None,
-                           help="root model; required for --provider openrouter")
-    mem_query.add_argument("--sub-model", default=None,
-                           help="sub-LM model; defaults to --model for openrouter")
-    mem_query.add_argument("--mode", choices=["mapreduce", "repl"], default="mapreduce")
-    mem_query.add_argument("--chunk-tokens", type=int, default=4000)
-    mem_query.add_argument("--max-depth", type=int, default=1)
+    mem_query.add_argument("--scope", choices=["memory", "project"], default="memory",
+                           help="memory=durable notes only; project=all repo files")
+    mem_query.add_argument("--top", type=int, default=5, help="number of blocks to return")
     mem_query.add_argument("--json", action="store_true")
     mem_query.set_defaults(fn=cmd_memory_query)
 
@@ -1400,44 +1587,9 @@ def main(argv: list[str] | None = None) -> int:
     mem_open.add_argument("--install-obsidian", action="store_true")
     mem_open.set_defaults(fn=cmd_memory_open)
 
-    rl = sub.add_parser(
-        "rlm", help="answer a query over a huge file via a Recursive Language Model")
-    rl.add_argument("file", nargs="?", default=".",
-                    help="file or directory with the context, or - for stdin "
-                         "(default: the current folder)")
-    rl.add_argument("--query", required=True, help="the question to answer")
-    rl.add_argument("--mode", choices=["mapreduce", "repl"], default="mapreduce")
-    rl.add_argument("--engine", choices=["ours", "official"], default="ours",
-                    help="ours=built-in engine; official=delegate to `pip install rlms`")
-    rl.add_argument("--provider",
-                    choices=["auto", "api", "cli", "gemini", "gemini-oauth",
-                             "gemini-cli", "openai", "openrouter",
-                             "codex", "openai-oauth", "fake"],
-                    default="auto",
-                    help="auto-detects from API keys / .env / subscription logins "
-                         "(gemini-oauth, gemini-cli, claude cli)")
-    rl.add_argument("--model", default=None,
-                    help="root model (required for --provider openrouter; otherwise default per-provider)")
-    rl.add_argument("--sub-model", default=None,
-                    help="cheap sub-LM model (defaults to --model for openrouter; otherwise default per-provider)")
-    rl.add_argument("--chunk-tokens", type=int, default=4000)
-    rl.add_argument("--max-depth", type=int, default=1)
-    rl.add_argument("--no-prefilter", action="store_true",
-                    help="disable keyword pre-filtering of chunks")
-    rl.add_argument("--graph", help="optional Graphify graph.json to expose in repl mode")
-    rl.add_argument("--include-secrets", action="store_true",
-                    help="when scanning a directory, DO send .env/keys/secrets to the LLM")
-    rl.add_argument("--json", action="store_true", help="emit full result as JSON")
-    rl.set_defaults(fn=cmd_rlm)
-
-    gl = sub.add_parser(
-        "gemini-login",
-        help="log in to Gemini by Google subscription (OAuth) for --provider gemini-oauth")
-    gl.set_defaults(fn=cmd_gemini_login)
-
     rep = sub.add_parser(
         "report",
-        help="savings report from .ctx/ledger.jsonl (tool-computed, not model-estimated)")
+        help="ledger estimate from .ctx/ledger.jsonl (input-side planning number)")
     rep.add_argument("--price", type=float, default=5.0,
                      help="input price $/MTok for the cost estimate (default 5.0)")
     rep.add_argument("--reset", action="store_true", help="clear the ledger")
@@ -1446,20 +1598,25 @@ def main(argv: list[str] | None = None) -> int:
                           "hook write can land (default 0)")
     rep.set_defaults(fn=cmd_report)
 
+    ms = sub.add_parser(
+        "measure",
+        help="REAL billed tokens + cache-hit rate from provider usage logs (pillar 5)")
+    ms.add_argument("--transcript", metavar="PATH",
+                    help="Claude Code transcript .jsonl file or dir "
+                         "(default: auto-detect ~/.claude/projects/<slug>/)")
+    ms.add_argument("--usage-json", metavar="PATH",
+                    help="API-mode usage: a JSON file (or - for stdin) of response "
+                         "usage objects")
+    ms.add_argument("--in-price", type=float, default=0.0,
+                    help="input $/MTok, to also print an effective dollar cost")
+    ms.add_argument("--out-price", type=float, default=0.0,
+                    help="output $/MTok, to also print an effective dollar cost")
+    ms.set_defaults(fn=cmd_measure)
+
     args = ap.parse_args(argv)
     if getattr(args, "command", None) and args.command and args.command[0] == "--":
         args.command = args.command[1:]
     return args.fn(args)
-
-
-def rlm_entry() -> int:
-    """Console-script entry: `rlm ...` behaves as `ctx rlm ...`."""
-    return main(["rlm", *sys.argv[1:]])
-
-
-def gemini_login_entry() -> int:
-    """Console-script entry: `ctx-rlm-login` == `ctx gemini-login`."""
-    return main(["gemini-login", *sys.argv[1:]])
 
 
 if __name__ == "__main__":

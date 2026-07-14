@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install CTX Agent Context Stack into the root of another project."""
+"""Install the CACP toolkit (ctx.py + memory + agent adapters) into a project."""
 
 from __future__ import annotations
 
@@ -58,7 +58,7 @@ def parse_agents(value: str) -> list[str]:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        description="Install CTX, RLM, memory, CodeGraph bootstrap, and handoff files."
+        description="Install the CACP toolkit (ctx.py, memory vault, agent adapters)."
     )
     parser.add_argument("project", nargs="?", default=".", help="target project root")
     parser.add_argument(
@@ -70,12 +70,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--force-toolkit",
         action="store_true",
-        help="replace existing ctx.py and rlm.py",
-    )
-    parser.add_argument(
-        "--no-codegraph",
-        action="store_true",
-        help="do not initialize CodeGraph",
+        help="replace an existing ctx.py",
     )
     parser.add_argument(
         "--open-obsidian",
@@ -89,7 +84,6 @@ def main(argv: list[str] | None = None) -> int:
 
     results = {
         "ctx.py": copy_file(ROOT / "ctx.py", project / "ctx.py", args.force_toolkit),
-        "rlm.py": copy_file(ROOT / "rlm.py", project / "rlm.py", args.force_toolkit),
     }
     if "generic" in args.agents:
         context = project / "AGENT_CONTEXT.md"
@@ -110,10 +104,7 @@ def main(argv: list[str] | None = None) -> int:
         )
 
     python = sys.executable
-    init = [python, "ctx.py", "memory", "init"]
-    if not args.no_codegraph:
-        init.append("--with-codegraph")
-    if run(init, project) != 0:
+    if run([python, "ctx.py", "memory", "init"], project) != 0:
         return 1
     if args.open_obsidian:
         if run([python, "ctx.py", "memory", "open", "--install-obsidian"], project) != 0:
@@ -124,7 +115,11 @@ def main(argv: list[str] | None = None) -> int:
     print("\nInstalled:")
     for name, result in results.items():
         print(f"- {name}: {result}")
-    print("\nNext: open the project with any coding agent and describe the task normally.")
+    print("\nNext:")
+    print("  1. Build the cache-stable startup packet: "
+          "python ctx.py pack --out .ctx/startup-packet.md")
+    print("  2. Open the project with any coding agent and describe the task normally.")
+    print("  3. After a session, check real savings: python ctx.py measure")
     return 0
 
 

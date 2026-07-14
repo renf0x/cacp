@@ -2,6 +2,23 @@
 
 Record meaningful changes to the memory system.
 
+## 2026-07-14 — CACP migration (v0.1.0)
+
+- Reframed the whole toolkit as **CACP (Cache-Aware Context Protocol)** with five
+  pillars: stable prefix (`pack`), tiered admission, durable-memory retrieval,
+  gated output, and real measurement (`measure`). See `METHOD.md`.
+- `ctx memory query` is now local, LLM-free top-k retrieval (`_retrieve`): it
+  returns the few relevant note blocks with no provider, keys, or sub-agent call.
+  `memory context` uses the same retrieval; `--with-codegraph` / CodeGraph removed.
+- Added `ctx pack` (deterministic startup packet; volatile handoff deliberately
+  excluded so the cached prefix stays byte-stable) and `ctx measure` (real billed
+  tokens + cache-read share from transcripts or an API usage dump).
+- Removed RLM and the CodeGraph integration; `report` no longer has an rlm
+  provider breakdown, and `pack` is treated as reconnaissance (kept out of the
+  savings headline like `map`).
+- Removed synthetic benchmark docs and the hardcoded benchmark-lab script; savings
+  are now proven per-project via `docs/measurement-protocol.md`.
+
 ## 2026-06-16
 
 - Added a raw no-compression token baseline workflow via `ctx rawcount`.
