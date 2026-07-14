@@ -12,6 +12,7 @@ The method has five pillars; the commands below implement them:
   5. Measured .........  `measure`/`report` -- real provider usage, not estimates
 
 Subcommands:
+  init [path]         scaffold CACP into a project (memory + agent adapters + packet)
   pack [path]         build a deterministic, cache-stable startup packet
   map [path]          repo map with per-file token estimates (what is expensive to read)
   digest <file>       structural digest of a file instead of a full read
@@ -1470,6 +1471,158 @@ def cmd_measure(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- init ----
+# Embedded agent-facing templates so a single downloaded ctx.py can scaffold a
+# project by itself (no clone, no templates/ dir). The files under templates/
+# are the human-readable mirror of these; keep them in sync.
+
+MANAGED_START = "<!-- CTX-AGENT-CONTEXT-STACK:START -->"
+MANAGED_END = "<!-- CTX-AGENT-CONTEXT-STACK:END -->"
+
+AGENT_CONTEXT_MD = """# Universal Agent Context Protocol (CACP)
+
+This file is vendor-neutral. Any coding agent in this project should follow it.
+
+Goal: answer the task while touching as few tokens as possible, and keep the
+cached prompt prefix stable so repeated context is nearly free.
+
+## Start of work
+
+1. If `memory/MEMORY.md` is missing, run `python ctx.py memory init`.
+2. Build/read the cache-stable startup packet once:
+   `python ctx.py pack --out .ctx/startup-packet.md`. Read it once; append the
+   task and handoff AFTER it, never edit the middle, so the prompt cache stays hot.
+3. For "what do we already know about X" use local retrieval, not a fresh read:
+   `python ctx.py memory query "<question>"` (add `--scope project` for repo-wide).
+
+## The context-saving ladder
+
+Climb cheap -> expensive; stop at the first rung that answers the question:
+`memory query` -> `map` -> `digest` -> `read` (funnelled full read) -> `run`.
+No full-repo reads.
+
+## Keep the cache hot
+
+Repeated prefix tokens bill at ~0.1x on the API and extend a subscription window.
+Read the stable packet once; append new material at the end; don't re-read files
+you already digested. After a session, verify with real numbers: `python ctx.py
+measure`. A low cache-read share means the prefix is being invalidated.
+
+## Output length (only when it pays)
+
+Write normally for short answers; compress only long explanations/reviews (drop
+filler, use fragments) and keep code, commands, paths, and errors byte-exact.
+
+## Quality & fewer retry turns
+
+Prefer small anchored patches over full rewrites; after an edit verify with
+`python ctx.py run -- <test/build>`; record durable findings and decisions in the
+memory journals so the next session does not re-derive them.
+
+## Memory & permanent rules
+
+Record durable findings in `memory/*.md`, link with `[[wiki-links]]`, keep
+`MEMORY.md` a thin index, never store source/logs/secrets. `handoff.md` is
+volatile (Now/Next/Blocked/Done) and stays OUT of the cached packet. Never edit
+`memory/project-rules.md` without user approval; after an approved change run
+`python ctx.py memory rules-approve --user-approved`.
+"""
+
+_ADAPTER_BODY = """## CACP - Cache-Aware Context Protocol
+
+Follow `AGENT_CONTEXT.md`. Answer tasks while touching as few tokens as possible
+AND keeping the cached prompt prefix stable so repeated context is nearly free.
+
+At session start build/read the stable packet:
+`python ctx.py pack --out .ctx/startup-packet.md` (rules + memory index + repo
+map, fixed order). Read it once; append the task/handoff AFTER it, never edit the
+middle or the prompt cache is invalidated.
+
+- Retrieve, don't re-read: `python ctx.py memory query "<q>"` (local, no LLM;
+  `--scope project` for repo-wide).
+- Climb the ladder for bulk: `ctx map`, `ctx digest <file>`, `ctx read <file>`,
+  `ctx run -- <cmd>`.
+- Verify to avoid retry turns: after edits run `ctx run -- <tests>`; prefer small
+  patches; record decisions in the memory journals.
+- Compress output only when it pays; keep code/commands/errors byte-exact.
+- Measure for real: `python ctx.py measure` shows actual billed tokens and
+  cache-read share.
+
+Do not change permanent project rules without explicit user approval. At task
+completion update the handoff, record durable findings, run `python ctx.py memory
+check`."""
+
+ADAPTER_CLAUDE = (f"{MANAGED_START}\n{_ADAPTER_BODY} Use `/compact` between "
+                  f"substantial tasks and `/clear` for unrelated work.\n{MANAGED_END}\n")
+ADAPTER_AGENTS = f"{MANAGED_START}\n{_ADAPTER_BODY}\n{MANAGED_END}\n"
+
+VALID_AGENTS = ("generic", "codex", "claude")
+
+
+def _parse_agents(value: str) -> list[str]:
+    if value == "all":
+        return list(VALID_AGENTS)
+    agents = [p.strip().lower() for p in value.split(",") if p.strip()]
+    bad = sorted(set(agents) - set(VALID_AGENTS))
+    if bad:
+        raise argparse.ArgumentTypeError(f"unknown agents: {', '.join(bad)}")
+    return agents or ["generic"]
+
+
+def _write_if_absent(path: Path, content: str) -> str:
+    if path.exists():
+        return "kept"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    return "created"
+
+
+def _append_managed_block(path: Path, block: str) -> str:
+    current = path.read_text(encoding="utf-8") if path.exists() else ""
+    if MANAGED_START in current:
+        return "kept"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    sep = "\n\n" if current.strip() else ""
+    path.write_text(current.rstrip() + sep + block.strip() + "\n", encoding="utf-8")
+    return "appended"
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    """Scaffold CACP into a project from this single file: memory vault, agent
+    adapters, and a first cache-stable packet. Idempotent and non-destructive --
+    existing files and rules are preserved. This is what makes `ctx.py` drop-in:
+    download the one file, run `python ctx.py init`, done."""
+    root = _project_root(args.path)
+    agents = args.agents if isinstance(args.agents, list) else _parse_agents(args.agents)
+    results: dict[str, str] = {}
+
+    # 1. memory vault + handoff + gitignore (reuses the tested initializer).
+    cmd_memory_init(argparse.Namespace(path=str(root)))
+
+    # 2. agent-facing instruction files.
+    if "generic" in agents:
+        results["AGENT_CONTEXT.md"] = _write_if_absent(root / "AGENT_CONTEXT.md",
+                                                       AGENT_CONTEXT_MD)
+    if "codex" in agents:
+        results["AGENTS.md"] = _append_managed_block(root / "AGENTS.md", ADAPTER_AGENTS)
+    if "claude" in agents:
+        results["CLAUDE.md"] = _append_managed_block(root / "CLAUDE.md", ADAPTER_CLAUDE)
+
+    # 3. build the first cache-stable startup packet.
+    packet = root / ".ctx" / "startup-packet.md"
+    cmd_pack(argparse.Namespace(path=str(root), top=40, warn=4000, digest=0,
+                                out=str(packet), quiet=True))
+
+    print(f"\n# CACP initialized in {root}")
+    for name, res in results.items():
+        print(f"- {name}: {res}")
+    print("- memory/: ready   - .ctx/startup-packet.md: built")
+    print("\nNext: open the project with your agent and describe the task. It will")
+    print("read .ctx/startup-packet.md, climb the ladder, and you can check real")
+    print("savings any time with `python ctx.py measure`.")
+    return 0
+
+
 # ---------------------------------------------------------------- main ----
 
 def main(argv: list[str] | None = None) -> int:
@@ -1485,6 +1638,14 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="ctx.py", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
+
+    ini = sub.add_parser(
+        "init",
+        help="scaffold CACP into a project (memory + agent adapters + first packet)")
+    ini.add_argument("path", nargs="?", default=".")
+    ini.add_argument("--agents", type=_parse_agents, default=_parse_agents("all"),
+                     help="all or comma list: generic,codex,claude (default: all)")
+    ini.set_defaults(fn=cmd_init)
 
     m = sub.add_parser("map", help="repo map with token estimates")
     m.add_argument("path", nargs="?", default=".")

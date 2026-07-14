@@ -44,12 +44,37 @@ your repo and task mix. `ctx measure` tells you what it actually was.
 
 ## Quick start
 
-### Requirements
+Requirements: **Python 3.10+** (stdlib only). Optional: Obsidian (a human-facing
+viewer for the memory vault).
 
-- Python 3.10+
-- Optional: Obsidian (a human-facing viewer for the memory vault)
+`ctx.py` is a **single self-contained file** — the fastest integration is to drop
+that one file into your project and run `init`.
 
-### Install into any project
+### Option A — one line (recommended)
+
+Run this in the **root of the project you want to set up**:
+
+```bash
+# macOS / Linux / WSL / Git Bash
+curl -fsSL https://raw.githubusercontent.com/renf0x/ctx-agent-context-stack/main/install.sh | bash
+```
+
+```powershell
+# Windows PowerShell
+irm https://raw.githubusercontent.com/renf0x/ctx-agent-context-stack/main/install.ps1 | iex
+```
+
+It downloads `ctx.py`, then runs `python ctx.py init` to scaffold the memory
+vault, agent adapters, and a first cache-stable packet. Non-destructive.
+
+### Option B — single file by hand
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/renf0x/ctx-agent-context-stack/main/ctx.py -o ctx.py
+python ctx.py init                 # scaffolds everything; --agents generic,claude to narrow
+```
+
+### Option C — clone (full repo + docs + tests)
 
 ```powershell
 git clone https://github.com/renf0x/ctx-agent-context-stack.git
@@ -57,16 +82,27 @@ cd ctx-agent-context-stack
 python install.py C:\path\to\your-project --agents all --open-obsidian
 ```
 
-The installer drops the portable toolkit into the **root of the target project**:
+### Ask your agent to set it up
+
+Paste this to Claude Code / Codex / Cursor in the target project:
+
+> Integrate CACP into this project: download `ctx.py` from
+> `https://raw.githubusercontent.com/renf0x/ctx-agent-context-stack/main/ctx.py`
+> into the repo root, run `python ctx.py init`, then read `.ctx/startup-packet.md`
+> and follow `AGENT_CONTEXT.md` from now on.
+
+### What init creates
+
+Any of the above drops the toolkit into the **root of the target project**:
 
 ```text
 your-project/
-  ctx.py
-  AGENT_CONTEXT.md
-  AGENTS.md
-  CLAUDE.md
+  ctx.py                  # the single-file tool
+  AGENT_CONTEXT.md        # vendor-neutral protocol
+  AGENTS.md / CLAUDE.md   # marked, idempotent adapter block (only agents you pick)
   handoff.md
-  memory/
+  memory/                 # durable Obsidian vault
+  .ctx/startup-packet.md  # first cache-stable packet (gitignored)
 ```
 
 It never overwrites existing `AGENTS.md` / `CLAUDE.md` — it appends one marked,
