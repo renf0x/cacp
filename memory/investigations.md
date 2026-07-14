@@ -1,5 +1,34 @@
 # Investigation Log
 
+## INV-20260714-004 Session splitting (handoff pattern) is MORE expensive than history replay
+
+- Status: closed
+- Date: 2026-07-14
+- Question: Instead of letting one session replay its history every turn, is it
+  cheaper to split work into fresh short sessions with durable state (handoff/
+  memory) — and does a digest packet fix the re-exploration cost?
+- Method: the same 8 audit questions as INV-002, run as 8 separate fresh
+  headless sessions. C = pure split (no CACP), D = split + `pack --digest 6`
+  packet loaded via CLAUDE.md. Same model/tools. Compared against A (one
+  continuous 24-turn session) by aggregating each variant's 8 real transcripts.
+- Findings (real):
+  - C (pure split): new input +328% (124k -> 531k), effective input +198.5%,
+    wall time 3m09s vs A's 1m52s. Every fresh session re-pays the full system
+    prompt as a cache WRITE and re-explores the repo at full price.
+  - D (split + packet): better than C (packet cut ~190k of re-exploration; new
+    input/turn even −8.4% vs A) but still effective input +124% vs A.
+  - Quality: comparable (7/8 answers cite code in both variants).
+  - Final measured cost ranking for this task class (effective input):
+    A continuous 269k < B1 CACP-instructions 353k < B2 464k < D 604k < C 805k.
+- Conclusion: history replay inside ONE session is the CHEAP mode — the platform
+  serves it at 0.1x; a session restart pays 1.25x cache-writes of the whole
+  system prompt plus full-price re-orientation. Splitting is justified only
+  when the replayed history exceeds the restart cost (context pollution, window
+  limits, task switch) — NOT as a per-turn economy. Handoff/memory are for
+  continuity and quality across necessary restarts. This vindicates pillar 1
+  (one continuous session, stable cached prefix) as the cheapest base mode.
+- Links: INV-20260714-002, INV-20260714-003, [[../docs/measurement-protocol]]
+
 ## INV-20260714-003 Validation run: the turn-batching INSTRUCTION did not hold
 
 - Status: closed

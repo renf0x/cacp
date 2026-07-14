@@ -118,6 +118,15 @@ Five real headless agent runs (INV-001..003) established the honest КПД:
   advisory text — richer `pack --digest K` startup packets that pre-answer
   exploration, and hook-level funnels (rewrite full reads into digests) that do
   not depend on model obedience. Quality stayed equal in all runs.
+- **Session splitting tested and rejected as an economy tool (INV-004):**
+  running the same 8 questions as 8 fresh sessions cost +198% effective input
+  (pure split) and +124% (split + digest packet) versus one continuous session,
+  because every restart re-pays the system prompt as a 1.25x cache write plus
+  full-price re-orientation, while in-session history replays at 0.1x. Measured
+  cost ranking: **one continuous session < CACP instructions < splitting**.
+  Restart only when replayed history exceeds restart cost (context pollution,
+  window limits, task switch); use handoff/memory for continuity across those
+  necessary restarts, not to save tokens.
 
 ## Non-goals (deliberately removed)
 
