@@ -1,5 +1,29 @@
 # Investigation Log
 
+## INV-20260715-005 Deterministic guard hook: first NET-positive result
+
+- Status: closed
+- Date: 2026-07-15
+- Question: Does deterministic enforcement (deny full reads of expensive files
+  via a PreToolUse hook) succeed where instructions failed (INV-003)?
+- Method: `ctx guard` wired as a Claude Code PreToolUse hook (deny Read of
+  files > 4k est tokens; ranged reads always pass). Same dedup/RECON question,
+  model, and tools as the INV-001 baseline. One real headless run.
+- Findings (real, single pair — variance caveat from INV-003 applies):
+  - The denial fired and the model IMMEDIATELY adapted: ran
+    `python ctx.py digest ctx.py` + 3 greps — the first ctx-command use in all
+    runs, achieved by force rather than instruction.
+  - vs the comparable no-guard run: new input −58.7%, new input/turn −73.4%,
+    output −24.1%, turns +55.6% (9→14, small ones), and **effective input
+    −40.1% (134,232 → 80,433) — the first variant where the NET total went
+    down**. Transcript 59.5 KB vs 233.8 KB. Answer correct with line citations.
+- Conclusion: enforcement beats instruction. The guard makes the admission
+  ladder mechanical: the expensive path is simply unavailable, and the model's
+  fallback (digest + grep + ranged reads) is both cheaper and adequate.
+  `ctx init --agents claude` now wires guard + ledger hooks automatically
+  (never overwriting an existing settings.json).
+- Links: INV-20260714-003, INV-20260714-001, `ctx.py` (`cmd_guard`)
+
 ## INV-20260714-004 Session splitting (handoff pattern) is MORE expensive than history replay
 
 - Status: closed

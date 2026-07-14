@@ -280,6 +280,58 @@ class PackTests(unittest.TestCase):
         self.assertIn("pack", [r["op"] for r in recs])
 
 
+class GuardTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.root = Path(self.temp.name)
+
+    def tearDown(self):
+        self.temp.cleanup()
+
+    def _guard(self, event: dict, max_tokens: int = 100) -> str:
+        args = argparse.Namespace(max_tokens=max_tokens)
+        with mock.patch("sys.stdin", io.StringIO(json.dumps(event))):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(ctx.cmd_guard(args), 0)
+        return out.getvalue()
+
+    def test_denies_full_read_of_expensive_file(self):
+        big = self.root / "big.py"
+        big.write_text("x = 1\n" * 500, encoding="utf-8")
+        out = self._guard({"tool_name": "Read", "tool_input": {"file_path": str(big)}})
+        data = json.loads(out)
+        hso = data["hookSpecificOutput"]
+        self.assertEqual(hso["permissionDecision"], "deny")
+        self.assertIn("digest", hso["permissionDecisionReason"])
+        self.assertIn("offset/limit", hso["permissionDecisionReason"])
+
+    def test_allows_small_files_ranged_reads_and_other_tools(self):
+        small = self.root / "small.py"
+        small.write_text("x = 1\n", encoding="utf-8")
+        big = self.root / "big.py"
+        big.write_text("x = 1\n" * 500, encoding="utf-8")
+        # small file passes
+        self.assertEqual(self._guard(
+            {"tool_name": "Read", "tool_input": {"file_path": str(small)}}), "")
+        # ranged read of a big file passes (the approved escape hatch)
+        self.assertEqual(self._guard(
+            {"tool_name": "Read",
+             "tool_input": {"file_path": str(big), "offset": 10, "limit": 50}}), "")
+        # non-Read tools pass
+        self.assertEqual(self._guard(
+            {"tool_name": "Bash", "tool_input": {"command": "ls"}}), "")
+
+    def test_silent_on_garbage_and_missing_files(self):
+        args = argparse.Namespace(max_tokens=100)
+        with mock.patch("sys.stdin", io.StringIO("not json")):
+            with contextlib.redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(ctx.cmd_guard(args), 0)
+        self.assertEqual(out.getvalue(), "")
+        self.assertEqual(self._guard(
+            {"tool_name": "Read",
+             "tool_input": {"file_path": str(self.root / "nope.py")}}), "")
+
+
 class DigestTests(unittest.TestCase):
     def test_sql_digest_keeps_schema_and_drops_data(self):
         sql = (

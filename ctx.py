@@ -1279,6 +1279,49 @@ def cmd_memory_open(args: argparse.Namespace) -> int:
     return 0
 
 
+# ---------------------------------------------------------------- guard ----
+
+def cmd_guard(args: argparse.Namespace) -> int:
+    """PreToolUse hook: deterministic enforcement of the admission ladder.
+
+    Instructions are weak -- INV-20260714-003 measured a model ignoring the
+    protocol entirely. This hook does not rely on obedience: wired as a Claude
+    Code PreToolUse hook for Read, it DENIES a full read of any file above the
+    token threshold and tells the agent the cheap alternatives (digest /
+    retrieval / ranged read). Reads with offset/limit pass through, so targeted
+    reading is never blocked. Silent and exit-0 on any malformed input."""
+    try:
+        event = json.loads(sys.stdin.read() or "{}")
+        if not isinstance(event, dict) or str(event.get("tool_name")) != "Read":
+            return 0
+        ti = event.get("tool_input") or {}
+        fp = ti.get("file_path")
+        # ranged reads are the approved escape hatch -- never block them
+        if not fp or ti.get("offset") or ti.get("limit"):
+            return 0
+        p = Path(fp)
+        if not p.is_file():
+            return 0
+        tok = est_tokens(read_text(p))
+        if tok < args.max_tokens:
+            return 0
+        reason = (
+            f"[ctx guard] {p.name} is ~{tok:,} est tokens (limit {args.max_tokens:,}). "
+            f"Full read denied to protect the context budget. Instead use: "
+            f"`python ctx.py digest \"{fp}\"` for structure; "
+            f"`python ctx.py memory query \"<question>\" --scope project` for retrieval; "
+            f"or Read with offset/limit for the specific range you need."
+        )
+        print(json.dumps({"hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }}))
+    except Exception:  # a hook must never break the agent loop
+        pass
+    return 0
+
+
 # ------------------------------------------------------------- rawcount ----
 
 # Files that usually hold secrets - excluded from directory scans by default.
@@ -1705,6 +1748,23 @@ ADAPTER_CLAUDE = (f"{MANAGED_START}\n{_ADAPTER_BODY} Use `/compact` between "
                   f"substantial tasks and `/clear` for unrelated work.\n{MANAGED_END}\n")
 ADAPTER_AGENTS = f"{MANAGED_START}\n{_ADAPTER_BODY}\n{MANAGED_END}\n"
 
+# Claude Code hook wiring: guard (PreToolUse) is the deterministic ladder --
+# INV-20260714 measured that instructions alone are ignored while the guard cut
+# effective input 40% net -- and hook (PostToolUse) keeps the ledger honest.
+CLAUDE_SETTINGS_JSON = json.dumps({
+    "hooks": {
+        "PreToolUse": [
+            {"matcher": "Read",
+             "hooks": [{"type": "command", "command": "python ctx.py guard"}]},
+        ],
+        "PostToolUse": [
+            {"matcher": "Read|Bash",
+             "hooks": [{"type": "command", "command": "python ctx.py hook",
+                        "async": True}]},
+        ],
+    },
+}, indent=2) + "\n"
+
 VALID_AGENTS = ("generic", "codex", "claude")
 
 
@@ -1756,6 +1816,9 @@ def cmd_init(args: argparse.Namespace) -> int:
         results["AGENTS.md"] = _append_managed_block(root / "AGENTS.md", ADAPTER_AGENTS)
     if "claude" in agents:
         results["CLAUDE.md"] = _append_managed_block(root / "CLAUDE.md", ADAPTER_CLAUDE)
+        # deterministic enforcement: never overwrite an existing settings file
+        results[".claude/settings.json"] = _write_if_absent(
+            root / ".claude" / "settings.json", CLAUDE_SETTINGS_JSON)
 
     # 3. build the first cache-stable startup packet.
     packet = root / ".ctx" / "startup-packet.md"
@@ -1845,6 +1908,13 @@ def main(argv: list[str] | None = None) -> int:
     hk.add_argument("--min-tokens", type=int, default=200,
                     help="ignore tool calls smaller than this (default 200)")
     hk.set_defaults(fn=cmd_hook)
+
+    gd = sub.add_parser(
+        "guard",
+        help="PreToolUse hook: DENY full reads of expensive files (deterministic ladder)")
+    gd.add_argument("--max-tokens", type=int, default=4000,
+                    help="deny full Reads of files above this estimate (default 4000)")
+    gd.set_defaults(fn=cmd_guard)
 
     rc = sub.add_parser(
         "rawcount",

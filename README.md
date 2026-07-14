@@ -176,17 +176,30 @@ confirm dollars/limit impact with `ctx measure`. See
 [docs/measurement-protocol.md](docs/measurement-protocol.md) for a reproducible
 A/B you run on your own usage.
 
-## Coverage hook (Claude Code)
+## Hooks (Claude Code): enforcement + coverage
 
-To capture reads that bypass `ctx` so the ledger reflects real coverage, wire a
-`PostToolUse` hook:
+`ctx init --agents claude` wires both hooks automatically (never overwriting an
+existing `.claude/settings.json`):
+
+- **`ctx guard` (PreToolUse)** — the deterministic ladder. Denies a full `Read`
+  of any file above ~4k est tokens and points the agent to `digest`/retrieval/
+  ranged reads (offset/limit always pass). Measured on a real run: the model
+  adapted instantly and **net effective input dropped 40%** at equal answer
+  quality — where instruction-only protocols had failed (see METHOD.md,
+  "Measured reality check").
+- **`ctx hook` (PostToolUse)** — logs reads that bypass ctx so the ledger's
+  coverage is honest.
 
 ```json
 {
   "hooks": {
+    "PreToolUse": [
+      { "matcher": "Read",
+        "hooks": [ { "type": "command", "command": "python ctx.py guard" } ] }
+    ],
     "PostToolUse": [
       { "matcher": "Read|Bash",
-        "hooks": [ { "type": "command", "command": "ctx hook", "async": true } ] }
+        "hooks": [ { "type": "command", "command": "python ctx.py hook", "async": true } ] }
     ]
   }
 }

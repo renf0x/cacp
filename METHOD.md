@@ -118,6 +118,12 @@ Five real headless agent runs (INV-001..003) established the honest КПД:
   advisory text — richer `pack --digest K` startup packets that pre-answer
   exploration, and hook-level funnels (rewrite full reads into digests) that do
   not depend on model obedience. Quality stayed equal in all runs.
+- **Deterministic guard: first net-positive result (INV-005).** `ctx guard` as a
+  PreToolUse hook denies full reads of expensive files (ranged reads always
+  pass). In a real run the model instantly adapted (digest + grep) and the NET
+  effective input dropped **−40.1%** vs the comparable unguarded run at equal
+  answer quality — where instruction-only variants had made totals worse.
+  Enforcement beats instruction; `init --agents claude` wires it automatically.
 - **Session splitting tested and rejected as an economy tool (INV-004):**
   running the same 8 questions as 8 fresh sessions cost +198% effective input
   (pure split) and +124% (split + digest packet) versus one continuous session,
