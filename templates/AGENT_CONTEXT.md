@@ -39,6 +39,15 @@ Climb from cheap to expensive. Stop at the first rung that answers the question.
    `python ctx.py run -- <command>` keeps only the salient extract and writes the
    full log to `.ctx/logs/`.
 
+## Turns Are The Most Expensive Unit
+
+Every extra turn replays the whole conversation history (measured on real
+transcripts: doubling turns doubled cache volume and erased the admission
+savings). Batch related work into FEW tool calls: chain commands in one shell
+call, pre-digest several files at once (`ctx pack --digest 5`), answer
+multi-part questions from one exploration pass. Ten small steps cost far more
+than three well-planned ones.
+
 ## Keep The Cache Hot (the biggest lever)
 
 Repeated prefix tokens bill at ~0.1x on the API and keep a subscription session

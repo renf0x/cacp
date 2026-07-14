@@ -14,6 +14,9 @@ never edit the middle, or the prompt cache is invalidated.
 - **Climb the ladder** for bulk: `ctx map` before opening files, `ctx digest
   <file>` for big files, `ctx read <file>` when a full read is unavoidable,
   `ctx run -- <cmd>` for noisy commands.
+- **Batch into few turns**: every extra turn replays the whole history — the
+  most expensive unit of a session. Chain related commands in one call; prefer
+  `ctx pack --digest 5` over per-file digest turns.
 - **Verify to avoid retry turns**: after edits run `ctx run -- <tests>`; prefer
   small patches over full rewrites; record decisions in the memory journals.
 - **Compress output only when it pays**: normal length for short answers; terse

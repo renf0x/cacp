@@ -75,12 +75,18 @@ aggregates the local ledger as an input-side **planning** estimate only. Every
 claimed saving is confirmed by `measure`, never assumed. See
 [docs/measurement-protocol.md](measurement-protocol.md) for a reproducible A/B.
 
-### Quality layer (spans 3–5)
+### Quality layer (spans 3–5): the turn is the unit of cost
 
-Retry turns are the most expensive tokens. Prefer small anchored patches over
-full-file rewrites; after an edit, verify with `ctx run -- <tests>`; record
-decisions in the memory journals. Removing a retry turn usually beats any
-per-turn trimming.
+Measured on real A/B transcripts (INV-20260714-002): a protocol that admitted
+−20.5% new input still ended up +31% more expensive because it took 2.2x more
+turns — every extra turn replays the whole history. Rules that follow:
+
+- **Batch**: chain related commands into one call; pre-digest several files at
+  once (`pack --digest K`) instead of one digest per turn; answer multi-part
+  questions from one exploration pass.
+- Prefer small anchored patches over full-file rewrites; after an edit, verify
+  with `ctx run -- <tests>`; record decisions in the memory journals. Removing
+  a retry turn usually beats any per-turn trimming.
 
 ## Applies to both ways you pay
 

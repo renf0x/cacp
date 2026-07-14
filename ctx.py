@@ -1639,6 +1639,13 @@ Climb cheap -> expensive; stop at the first rung that answers the question:
 `memory query` -> `map` -> `digest` -> `read` (funnelled full read) -> `run`.
 No full-repo reads.
 
+## Turns are the most expensive unit
+
+Every extra turn replays the whole conversation history. Batch related work
+into FEW tool calls: chain commands in one shell call, digest several files at
+once (`pack --digest 5`), answer multi-part questions from one exploration pass.
+Ten small steps cost far more than three well-planned ones.
+
 ## Keep the cache hot
 
 Repeated prefix tokens bill at ~0.1x on the API and extend a subscription window.
@@ -1680,6 +1687,10 @@ middle or the prompt cache is invalidated.
   `--scope project` for repo-wide).
 - Climb the ladder for bulk: `ctx map`, `ctx digest <file>`, `ctx read <file>`,
   `ctx run -- <cmd>`.
+- Batch into FEW turns: every extra turn replays the whole history — the most
+  expensive unit of a session (measured: +120% turns doubled cache volume and
+  erased the admission savings). Chain related commands in ONE call; prefer
+  `pack --digest 5` over per-file digest turns.
 - Verify to avoid retry turns: after edits run `ctx run -- <tests>`; prefer small
   patches; record decisions in the memory journals.
 - Compress output only when it pays; keep code/commands/errors byte-exact.

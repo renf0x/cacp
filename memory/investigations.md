@@ -1,5 +1,31 @@
 # Investigation Log
 
+## INV-20260714-002 Real headless A/B: long 8-part audit task (the honest КПД)
+
+- Status: closed
+- Date: 2026-07-14
+- Question: Does CACP's per-turn saving amortize on a longer real task, and what
+  is the true net effect isolated from platform caching?
+- Method: same repos as INV-001, 8-part audit task forcing broad file coverage,
+  same model (haiku), same tools, max 40 turns, one pair. Real transcripts
+  compared with `measure --compare`; behavior diffed from tool_use records.
+- Findings (real, single pair):
+  - TOTAL new input admitted: −20.5% for B (124,111 → 98,708) — the admission
+    discipline DID amortize (per-turn −64%). Output/turn −41.7%.
+  - BUT turns 24 → 53 (+120%): B worked in many small steps. Every extra turn
+    replays the whole history, so cache-read volume doubled (1.15M → 2.30M) and
+    EFFECTIVE input rose +31% — B was net MORE expensive despite admitting less.
+    Wall time +16% (1m52s → 2m10s). Quality: both audits complete and correct.
+  - Behavior: B mostly IGNORED ctx commands (no digest/map/query calls; it used
+    grep + windowed reads instead) — instruction adherence of a small model is
+    weak; the admission gain came from the protocol's "read less" pressure, not
+    from the tools themselves.
+- Conclusion: the dominant cost unit of a session is the TURN, not the file
+  read. A context protocol only nets positive if it does NOT multiply turns:
+  batch exploration into few calls, pre-digest via `pack --digest K` instead of
+  per-file digest turns. Adapter rules updated accordingly (turn-batching rule).
+- Links: [[../docs/measurement-protocol]], INV-20260714-001
+
 ## INV-20260714-001 Real headless A/B: baseline vs CACP on a short task
 
 - Status: closed
