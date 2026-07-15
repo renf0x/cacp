@@ -20,8 +20,8 @@ dependencies = []
 anthropic = ["anthropic>=0.39"]
 
 [project.urls]
-Homepage = "https://github.com/renf0x/ctx-agent-context-stack"
-Repository = "https://github.com/renf0x/ctx-agent-context-stack"
+Homepage = "https://github.com/renf0x/cacp"
+Repository = "https://github.com/renf0x/cacp"
 
 # Installs the global `ctx` command so the toolkit resolves from any folder. A
 # local `ctx.py` copy dropped by install.py still takes priority when present.

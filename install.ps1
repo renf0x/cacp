@@ -1,6 +1,6 @@
 # CACP one-line installer (Windows PowerShell).
 #
-#   irm https://raw.githubusercontent.com/renf0x/ctx-agent-context-stack/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/renf0x/cacp/main/install.ps1 | iex
 #
 # Downloads the single self-contained ctx.py into the current project and runs
 # `python ctx.py init` to scaffold the memory vault, agent adapters, and a first
@@ -16,7 +16,7 @@ param(
 
 $ErrorActionPreference = "Stop"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-$raw = "https://raw.githubusercontent.com/renf0x/ctx-agent-context-stack/main/ctx.py"
+$raw = "https://raw.githubusercontent.com/renf0x/cacp/main/ctx.py"
 
 $py = (Get-Command python -ErrorAction SilentlyContinue).Source
 if (-not $py) { $py = (Get-Command py -ErrorAction SilentlyContinue).Source }

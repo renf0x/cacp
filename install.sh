@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # CACP one-line installer (macOS / Linux / WSL / Git Bash).
 #
-#   curl -fsSL https://raw.githubusercontent.com/renf0x/ctx-agent-context-stack/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/renf0x/cacp/main/install.sh | bash
 #
 # Downloads the single self-contained ctx.py into the current project and runs
 # `python ctx.py init` to scaffold the memory vault, agent adapters, and a first
 # cache-stable startup packet. Non-destructive: existing files are kept.
 set -euo pipefail
 
-RAW="https://raw.githubusercontent.com/renf0x/ctx-agent-context-stack/main/ctx.py"
+RAW="https://raw.githubusercontent.com/renf0x/cacp/main/ctx.py"
 TARGET="${1:-.}"
 AGENTS="${CACP_AGENTS:-all}"
 

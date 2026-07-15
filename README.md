@@ -56,12 +56,12 @@ Run this in the **root of the project you want to set up**:
 
 ```bash
 # macOS / Linux / WSL / Git Bash
-curl -fsSL https://raw.githubusercontent.com/renf0x/ctx-agent-context-stack/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/renf0x/cacp/main/install.sh | bash
 ```
 
 ```powershell
 # Windows PowerShell
-irm https://raw.githubusercontent.com/renf0x/ctx-agent-context-stack/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/renf0x/cacp/main/install.ps1 | iex
 ```
 
 It downloads `ctx.py`, then runs `python ctx.py init` to scaffold the memory
@@ -70,15 +70,15 @@ vault, agent adapters, and a first cache-stable packet. Non-destructive.
 ### Option B — single file by hand
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/renf0x/ctx-agent-context-stack/main/ctx.py -o ctx.py
+curl -fsSL https://raw.githubusercontent.com/renf0x/cacp/main/ctx.py -o ctx.py
 python ctx.py init                 # scaffolds everything; --agents generic,claude to narrow
 ```
 
 ### Option C — clone (full repo + docs + tests)
 
 ```powershell
-git clone https://github.com/renf0x/ctx-agent-context-stack.git
-cd ctx-agent-context-stack
+git clone https://github.com/renf0x/cacp.git
+cd cacp
 python install.py C:\path\to\your-project --agents all --open-obsidian
 ```
 
@@ -87,7 +87,7 @@ python install.py C:\path\to\your-project --agents all --open-obsidian
 Paste this to Claude Code / Codex / Cursor in the target project:
 
 > Integrate CACP into this project: download `ctx.py` from
-> `https://raw.githubusercontent.com/renf0x/ctx-agent-context-stack/main/ctx.py`
+> `https://raw.githubusercontent.com/renf0x/cacp/main/ctx.py`
 > into the repo root, run `python ctx.py init`, then read `.ctx/startup-packet.md`
 > and follow `AGENT_CONTEXT.md` from now on.
 
