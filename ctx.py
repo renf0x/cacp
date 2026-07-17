@@ -21,13 +21,14 @@ Subcommands:
   count <file|->      token count of a file or stdin (exact via API if key present)
   rawcount <path|->   token count of unsqueezed text with no compression or ledger savings
   memory ...          durable memory vault (init/check/context/query/rotate/...)
+  session ...         session-length cost control (save/snapshot/restore/gauge)
   report              admitted-vs-avoided tokens from the local ledger (planning estimate)
   measure             REAL billed tokens + cache-hit rate from provider usage logs
 """
 
 from __future__ import annotations
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 import argparse
 import datetime
@@ -1322,6 +1323,264 @@ def cmd_guard(args: argparse.Namespace) -> int:
     return 0
 
 
+# ------------------------------------------------------------- session ----
+# Session-length cost control (pillar 6). Admission discipline cannot shrink an
+# already-long conversation: every turn re-sends the whole history, and only
+# the harness can truncate the live context (/compact, /clear). What a tool CAN
+# do is make truncation early, cheap and lossless:
+#   gauge    (UserPromptSubmit hook)  warn -- from REAL usage -- when the live
+#            context is expensive, so compaction happens before the burn
+#   save     agent-written distillate of the session -> .ctx/session-state.md
+#   snapshot (PreCompact hook) deterministic transcript extract as a floor
+#            under compaction even when the agent saved nothing
+#   restore  (SessionStart hook: compact/clear/resume) re-inject the small
+#            state file so the agent does not re-read files to re-derive it
+
+SESSION_STATE_PATH = Path(".ctx") / "session-state.md"
+STATE_SECTIONS = ("Agent notes", "Auto snapshot")
+STATE_HEADER = (
+    "# Session state -- survives /compact, /clear and restarts.\n"
+    "# Managed by `ctx session save` (agent) / `ctx session snapshot` (auto).\n"
+)
+
+
+def _read_hook_event() -> dict:
+    """Parse the hook JSON Claude Code pipes on stdin; {} when run by hand.
+    A hook's stdin is written-then-closed immediately, but a MANUAL run may
+    inherit a pipe that never closes -- so the read happens on a daemon thread
+    with a 1s deadline instead of blocking the shell forever. Never raises."""
+    try:
+        if sys.stdin is None or sys.stdin.isatty():
+            return {}
+        import threading
+        buf: list[str] = []
+        reader = threading.Thread(target=lambda: buf.append(sys.stdin.read()),
+                                  daemon=True)
+        reader.start()
+        reader.join(1.0)
+        if not buf:
+            return {}  # stdin open but silent: a by-hand run, not a hook
+        obj = json.loads(buf[0] or "{}")
+        return obj if isinstance(obj, dict) else {}
+    except Exception:
+        return {}
+
+
+def _tail_text(path: Path, max_bytes: int) -> str:
+    """Last max_bytes of a file, decoded leniently -- transcripts grow to tens
+    of MB and the records that matter are at the end."""
+    with path.open("rb") as fh:
+        fh.seek(0, os.SEEK_END)
+        size = fh.tell()
+        fh.seek(max(0, size - max_bytes))
+        return fh.read().decode("utf-8", errors="replace")
+
+
+def _last_context_tokens(transcript: Path) -> int:
+    """Live context size: total input of the LAST main-chain assistant turn
+    (uncached + cache read + cache write) -- what every further turn re-sends."""
+    latest = 0
+    for line in _tail_text(transcript, 400_000).splitlines():
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict) or obj.get("isSidechain"):
+            continue
+        msg = obj.get("message")
+        if not isinstance(msg, dict) or msg.get("role") != "assistant":
+            continue
+        usage = msg.get("usage")
+        if isinstance(usage, dict):
+            tok = sum(int(usage.get(k, 0) or 0) for k in (
+                "input_tokens", "cache_read_input_tokens",
+                "cache_creation_input_tokens"))
+            if tok:
+                latest = tok
+    return latest
+
+
+def _state_sections_read() -> dict[str, str]:
+    if not SESSION_STATE_PATH.is_file():
+        return {}
+    sections: dict[str, str] = {}
+    current: str | None = None
+    buf: list[str] = []
+    for ln in read_text(SESSION_STATE_PATH).splitlines():
+        m = re.match(r"^##\s+(.+?)\s*$", ln)
+        if m and m.group(1) in STATE_SECTIONS:
+            if current:
+                sections[current] = "\n".join(buf).strip()
+            current, buf = m.group(1), []
+        elif current is not None:
+            buf.append(ln)
+    if current:
+        sections[current] = "\n".join(buf).strip()
+    return sections
+
+
+def _state_write(agent: str | None, auto: str | None) -> None:
+    """Update one section of the state file, preserving the other (None=keep)."""
+    sections = _state_sections_read()
+    stamp = datetime.datetime.now().isoformat(timespec="seconds")
+    if agent is not None:
+        sections["Agent notes"] = f"_Saved: {stamp}_\n\n{agent.strip()}"
+    if auto is not None:
+        sections["Auto snapshot"] = f"_Saved: {stamp}_\n\n{auto.strip()}"
+    parts = [STATE_HEADER]
+    for name in STATE_SECTIONS:
+        if sections.get(name):
+            parts.append(f"## {name}\n\n{sections[name]}\n")
+    SESSION_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    SESSION_STATE_PATH.write_text("\n".join(parts), encoding="utf-8")
+
+
+_TRANSCRIPT_NOISE_RE = re.compile(
+    r"<(?:local-command|command-name|command-message|command-args|system-reminder)"
+    r"|^\s*Caveat:|^\[Request interrupted"
+    r"|^This session is being continued", re.IGNORECASE)
+_EDIT_TOOLS = {"Edit", "Write", "MultiEdit", "NotebookEdit"}
+
+
+def _extract_session_facts(transcript: Path) -> tuple[list[str], list[str]]:
+    """Deterministic facts from the transcript tail: the last real user asks
+    (what the work is) and the files the agent edited (where it happened).
+    No LLM -- this is the lossless floor under a compaction, not a summary."""
+    asks: list[str] = []
+    files: dict[str, None] = {}
+    for line in _tail_text(transcript, 2_000_000).splitlines():
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(obj, dict) or obj.get("isSidechain"):
+            continue
+        msg = obj.get("message")
+        if not isinstance(msg, dict):
+            continue
+        content = msg.get("content")
+        if msg.get("role") == "user":
+            if isinstance(content, str):
+                text = content
+            elif isinstance(content, list):
+                text = " ".join(c.get("text", "") for c in content
+                                if isinstance(c, dict) and c.get("type") == "text")
+            else:
+                text = ""
+            text = text.strip()
+            if not text or _TRANSCRIPT_NOISE_RE.search(text):
+                continue
+            asks.append(text[:280] + (" ..." if len(text) > 280 else ""))
+        elif msg.get("role") == "assistant" and isinstance(content, list):
+            for c in content:
+                if (isinstance(c, dict) and c.get("type") == "tool_use"
+                        and c.get("name") in _EDIT_TOOLS):
+                    inp = c.get("input") or {}
+                    fp = inp.get("file_path") or inp.get("notebook_path")
+                    if isinstance(fp, str):
+                        files.pop(fp, None)  # re-insert: most-recent-last order
+                        files[fp] = None
+    return asks[-6:], list(files)[-15:]
+
+
+def cmd_session_save(args: argparse.Namespace) -> int:
+    """Persist the agent's own distillate of the session (goal, decisions,
+    open items, key paths) so /compact or /clear loses nothing. The agent
+    writes the content -- it knows the session; ctx stores it deterministically
+    and `restore` re-injects it after compaction at ~zero re-derivation cost."""
+    note = sys.stdin.read() if args.stdin else (args.note or "")
+    note = note.strip()
+    if not note:
+        sys.stderr.write('[ctx] session save: pass --note "..." or --stdin with content\n')
+        return 2
+    if len(note) > args.max_chars:
+        note = note[: args.max_chars].rstrip() + "\n... [truncated by ctx]"
+    _state_write(agent=note, auto=None)
+    print(f"# session state saved: {SESSION_STATE_PATH} (~{est_tokens(note):,} tok; "
+          f"auto-restored after /compact, /clear, resume)")
+    return 0
+
+
+def cmd_session_snapshot(args: argparse.Namespace) -> int:
+    """PreCompact hook (also runnable by hand): deterministic transcript
+    extract into the state file right before compaction, so even a session the
+    agent never distilled keeps its floor. Silent on error; never blocks."""
+    try:
+        event = _read_hook_event()
+        tp = event.get("transcript_path") or args.transcript
+        if not tp or not Path(tp).is_file():
+            return 0
+        asks, files = _extract_session_facts(Path(tp))
+        if not asks and not files:
+            return 0
+        lines: list[str] = []
+        if asks:
+            lines.append("Last user asks:")
+            lines.extend(f"- {a}" for a in asks)
+        if files:
+            lines.append("Files edited this session:")
+            lines.extend(f"- {f}" for f in files)
+        _state_write(agent=None, auto="\n".join(lines))
+        print(f"# auto snapshot written to {SESSION_STATE_PATH}")
+    except Exception:  # a hook must never break the agent loop
+        pass
+    return 0
+
+
+def cmd_session_restore(args: argparse.Namespace) -> int:
+    """SessionStart hook (compact/clear/resume): print the saved state so the
+    harness injects it into the fresh context. Small by construction -- the
+    point is to spend ~1k tokens instead of re-reading files to re-derive
+    where the work stood. Run by hand it doubles as `show`."""
+    try:
+        event = _read_hook_event()
+        source = str(event.get("source") or args.source or "manual")
+        if not SESSION_STATE_PATH.is_file():
+            return 0
+        age_h = (time.time() - SESSION_STATE_PATH.stat().st_mtime) / 3600.0
+        if source == "startup" and age_h > args.max_age_hours:
+            return 0  # stale state must not haunt a fresh, unrelated session
+        text = read_text(SESSION_STATE_PATH).strip()
+        if len(text) > args.max_chars:
+            text = text[: args.max_chars].rstrip() + \
+                "\n... [truncated; open .ctx/session-state.md]"
+        print(f"[ctx session restore | source={source} | saved {age_h:.1f}h ago]")
+        print(text)
+        print("(Durable memory: memory/MEMORY.md; volatile tasks: handoff.md. "
+              "Do not re-read files already summarized above.)")
+    except Exception:  # a hook must never break the agent loop
+        pass
+    return 0
+
+
+def cmd_session_gauge(args: argparse.Namespace) -> int:
+    """UserPromptSubmit hook: inject ONE short line only when the live context
+    is expensive. Reads REAL usage from the transcript (same fields as
+    `measure`), so the warning states what the next turn will actually
+    re-send. Below the threshold it prints nothing and costs nothing."""
+    try:
+        event = _read_hook_event()
+        tp = event.get("transcript_path") or args.transcript
+        if not tp or not Path(tp).is_file():
+            return 0
+        ctx_tok = _last_context_tokens(Path(tp))
+        if ctx_tok < args.warn_tokens:
+            return 0
+        if SESSION_STATE_PATH.is_file():
+            age_h = (time.time() - SESSION_STATE_PATH.stat().st_mtime) / 3600.0
+            state = f"state saved {age_h:.1f}h ago"
+        else:
+            state = "state NOT saved"
+        push = "compact NOW" if ctx_tok >= args.crit_tokens else "compact soon"
+        print(f"[ctx gauge] live context ~{ctx_tok / 1000:.0f}k tok -- every turn "
+              f"re-sends it all; {state}. Batch remaining work, save state "
+              f"(`python ctx.py session save --stdin`), recommend /compact to "
+              f"the user ({push}).")
+    except Exception:  # a hook must never break the agent loop
+        pass
+    return 0
+
+
 # ------------------------------------------------------------- rawcount ----
 
 # Files that usually hold secrets - excluded from directory scans by default.
@@ -1689,6 +1948,20 @@ into FEW tool calls: chain commands in one shell call, digest several files at
 once (`pack --digest 5`), answer multi-part questions from one exploration pass.
 Ten small steps cost far more than three well-planned ones.
 
+## Session length is the second cost axis
+
+Admission discipline does not shrink an already-long conversation; only the
+harness can truncate the live context (/compact, /clear). Make truncation
+early and lossless instead of avoiding it:
+
+- When a task lands (or `[ctx gauge]` warns), distill the session:
+  `python ctx.py session save --stdin` (goal, decisions, open items, paths).
+- PreCompact auto-snapshots the transcript; SessionStart re-injects the saved
+  state after /compact, /clear or resume -- do not re-read files to re-derive
+  what the restored state already says.
+- Treat a `[ctx gauge]` line as the signal to batch remaining work, save
+  state, and recommend /compact to the user.
+
 ## Keep the cache hot
 
 Repeated prefix tokens bill at ~0.1x on the API and extend a subscription window.
@@ -1736,6 +2009,9 @@ middle or the prompt cache is invalidated.
   `pack --digest 5` over per-file digest turns.
 - Verify to avoid retry turns: after edits run `ctx run -- <tests>`; prefer small
   patches; record decisions in the memory journals.
+- Session length: when `[ctx gauge]` warns, batch the remaining work, distill
+  state with `python ctx.py session save --stdin`, and recommend /compact --
+  the saved state is auto-restored after compaction, so nothing is lost.
 - Compress output only when it pays; keep code/commands/errors byte-exact.
 - Measure for real: `python ctx.py measure` shows actual billed tokens and
   cache-read share.
@@ -1751,6 +2027,9 @@ ADAPTER_AGENTS = f"{MANAGED_START}\n{_ADAPTER_BODY}\n{MANAGED_END}\n"
 # Claude Code hook wiring: guard (PreToolUse) is the deterministic ladder --
 # INV-20260714 measured that instructions alone are ignored while the guard cut
 # effective input 40% net -- and hook (PostToolUse) keeps the ledger honest.
+# The session trio closes the second cost axis (session length): gauge warns
+# from real usage, snapshot preserves state before compaction, restore
+# re-injects it after /compact//clear/resume so nothing is re-derived.
 CLAUDE_SETTINGS_JSON = json.dumps({
     "hooks": {
         "PreToolUse": [
@@ -1761,6 +2040,19 @@ CLAUDE_SETTINGS_JSON = json.dumps({
             {"matcher": "Read|Bash",
              "hooks": [{"type": "command", "command": "python ctx.py hook",
                         "async": True}]},
+        ],
+        "UserPromptSubmit": [
+            {"hooks": [{"type": "command",
+                        "command": "python ctx.py session gauge"}]},
+        ],
+        "PreCompact": [
+            {"hooks": [{"type": "command",
+                        "command": "python ctx.py session snapshot"}]},
+        ],
+        "SessionStart": [
+            {"matcher": "compact|clear|resume",
+             "hooks": [{"type": "command",
+                        "command": "python ctx.py session restore"}]},
         ],
     },
 }, indent=2) + "\n"
@@ -1966,6 +2258,48 @@ def main(argv: list[str] | None = None) -> int:
     mem_open.add_argument("path", nargs="?", default=".")
     mem_open.add_argument("--install-obsidian", action="store_true")
     mem_open.set_defaults(fn=cmd_memory_open)
+
+    ses = sub.add_parser(
+        "session",
+        help="session-length cost control: distill/restore state, context gauge")
+    ses_sub = ses.add_subparsers(dest="session_cmd", required=True)
+
+    s_save = ses_sub.add_parser(
+        "save",
+        help="store the agent-written session distillate (survives /compact, /clear)")
+    s_save.add_argument("--note", help="distillate text inline")
+    s_save.add_argument("--stdin", action="store_true",
+                        help="read distillate text from stdin")
+    s_save.add_argument("--max-chars", type=int, default=6000)
+    s_save.set_defaults(fn=cmd_session_save)
+
+    s_snap = ses_sub.add_parser(
+        "snapshot",
+        help="PreCompact hook: deterministic transcript extract into the state file")
+    s_snap.add_argument("--transcript",
+                        help="transcript .jsonl (hook JSON on stdin supplies it)")
+    s_snap.set_defaults(fn=cmd_session_snapshot)
+
+    s_rest = ses_sub.add_parser(
+        "restore",
+        help="SessionStart hook: print saved state for injection (by hand: show)")
+    s_rest.add_argument("--source",
+                        help="override hook source (startup/resume/clear/compact)")
+    s_rest.add_argument("--max-age-hours", type=float, default=72.0,
+                        help="on startup, skip state older than this (default 72)")
+    s_rest.add_argument("--max-chars", type=int, default=8000)
+    s_rest.set_defaults(fn=cmd_session_restore)
+
+    s_gau = ses_sub.add_parser(
+        "gauge",
+        help="UserPromptSubmit hook: one-line warning when live context is expensive")
+    s_gau.add_argument("--transcript",
+                       help="transcript .jsonl (hook JSON on stdin supplies it)")
+    s_gau.add_argument("--warn-tokens", type=int, default=80_000,
+                       help="warn when the live context exceeds this (default 80000)")
+    s_gau.add_argument("--crit-tokens", type=int, default=120_000,
+                       help="urge immediate compaction above this (default 120000)")
+    s_gau.set_defaults(fn=cmd_session_gauge)
 
     rep = sub.add_parser(
         "report",

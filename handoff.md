@@ -2,6 +2,9 @@
 
 ## Now
 
+- Shipped **v0.2.0: `ctx session` session-length control** (gauge / save /
+  snapshot / restore + hook wiring in `init` and README). See DEC-20260717-001.
+
 - Migrated the toolkit to **CACP (Cache-Aware Context Protocol), v0.1.0**. Trimmed
   to the deterministic core and added the two levers the old stack missed:
   cache-stable layout (`ctx pack`) and real provider-usage measurement

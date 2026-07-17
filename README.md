@@ -214,6 +214,35 @@ commands (so they are not double-counted), and de-duplicates a tool call by its
 > install, so auto-allowing `python ctx.py` would let any cloned repo's `ctx.py`
 > run without a prompt.
 
+## Session-length control (`ctx session`)
+
+Admission discipline (guard/digest) attacks the wrong axis in a long session:
+the dominant cost is the conversation itself — every turn re-sends the whole
+history, and only the harness can truncate the live context (`/compact`,
+`/clear`). No external tool can shrink it. What `ctx session` does instead is
+make truncation **early, informed and lossless**, so it actually gets used:
+
+- **`session gauge`** (UserPromptSubmit hook) — reads REAL usage from the
+  transcript and injects a one-line warning only when the live context crosses
+  a threshold (default 80k tok; "compact NOW" at 120k). Below it: silent, free.
+- **`session save --stdin | --note "..."`** — the agent writes a small
+  distillate (goal, decisions, open items, key paths) to
+  `.ctx/session-state.md`. That file survives `/compact`, `/clear`, restarts.
+- **`session snapshot`** (PreCompact hook) — deterministic floor under any
+  compaction: extracts the last real user asks + files edited from the
+  transcript, even if the agent never saved anything.
+- **`session restore`** (SessionStart hook, matcher `compact|clear|resume`) —
+  prints the state file so the harness re-injects it into the fresh context:
+  ~1k tokens instead of re-reading files to re-derive where the work stood.
+
+The state file is two managed sections (`## Agent notes` written by `save`,
+`## Auto snapshot` written by the hook); updating one preserves the other.
+`.ctx/` is gitignored — session state is volatile by design; durable knowledge
+still belongs in `memory/`.
+
+> Hook configs are captured at session start — after wiring these, restart the
+> agent session for them to take effect.
+
 ## Durable memory (Obsidian vault)
 
 `memory/` is a plugin-free Obsidian vault living **in the repository**, so it is
