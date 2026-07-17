@@ -2132,10 +2132,12 @@ def cmd_init(args: argparse.Namespace) -> int:
 def main(argv: list[str] | None = None) -> int:
     # Legacy Windows consoles default to cp1251/cp866, which cannot encode
     # characters that routinely appear in answers (arrows, em dashes, etc.).
-    # Force UTF-8 so output never crashes with UnicodeEncodeError.
-    for _stream in (sys.stdout, sys.stderr):
+    # Force UTF-8 so output never crashes with UnicodeEncodeError; stdin too, so
+    # a piped `session save --stdin` with non-ASCII text is not mojibaked by the
+    # console's default decoder.
+    for _stream in (sys.stdout, sys.stderr, sys.stdin):
         try:
-            _stream.reconfigure(encoding="utf-8")  # type: ignore[attr-defined]
+            _stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
         except (AttributeError, ValueError):
             pass
 
