@@ -1546,8 +1546,10 @@ def cmd_session_restore(args: argparse.Namespace) -> int:
                 "\n... [truncated; open .ctx/session-state.md]"
         print(f"[ctx session restore | source={source} | saved {age_h:.1f}h ago]")
         print(text)
-        print("(Durable memory: memory/MEMORY.md; volatile tasks: handoff.md. "
-              "Do not re-read files already summarized above.)")
+        print("(This is a POINTER to where work stood, not ground truth: it can be "
+              "stale or incomplete. Re-read a file before you change it; trust the "
+              "code over this note on any conflict. Durable memory: memory/MEMORY.md; "
+              "volatile tasks: handoff.md.)")
     except Exception:  # a hook must never break the agent loop
         pass
     return 0
